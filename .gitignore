@@ -1,0 +1,12 @@
+node_modules/
+client-rs/target/
+dist/
+chrome/
+*.tar.gz
+*.zip
+.DS_Store
+*.log
+.npm/
+.env
+__pycache__/
+*.pyc

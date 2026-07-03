@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# ─── BCLI — Terminal Interactive Browser ───────────────────────────────────
+# Global command that connects to the TermWeb server and displays the
+# browser screen in your terminal with full mouse/keyboard control.
+#
+# Usage:
+#   bcli                    — connect to ws://127.0.0.1:9222/browser
+#   bcli --connect ws://... — connect to custom server
+#   bcli --server           — start the background server first, then connect
+#   bcli --help             — show full help
+#
+# First run will build the Rust client automatically.
+# ────────────────────────────────────────────────────────────────────────────
+
+set -e
+
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CLIENT_DIR="$REPO_DIR/client-rs"
+BINARY="$CLIENT_DIR/target/release/bcli"
+CARGO="$(command -v cargo || true)"
+
+# ─── Help ───────────────────────────────────────────────────────────────────
+if [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
+  echo "BCLI — Terminal Interactive Browser"
+  echo ""
+  echo "Connects to the TermWeb background browser daemon and displays"
+  echo "the live page in your terminal with full mouse and keyboard control."
+  echo ""
+  echo "USAGE:"
+  echo "  bcli                          Connect to default server"
+  echo "  bcli -c ws://HOST:PORT/PATH   Connect to custom server"
+  echo "  bcli --server                 Start server daemon + connect"
+  echo "  bcli -u https://example.com   Connect + navigate to URL"
+  echo "  bcli --help                   Show this help"
+  echo ""
+  echo "CONTROLS (while in the browser view):"
+  echo "  Click / drag     — Interact with the page (mouse)"
+  echo "  Scroll           — Scroll up/down"
+  echo "  Keyboard         — Type directly into web forms"
+  echo "  Ctrl+C           — Disconnect (server keeps running)"
+  echo "  Ctrl+R           — Refresh screenshot"
+  echo "  Ctrl+W           — Show current URL"
+  echo "  Ctrl+T           — Toggle typing mode indicator"
+  echo ""
+  echo "SERVER:  node $REPO_DIR/server/index.js --url https://example.com"
+  echo "CLIENT:  The Rust binary will be auto-built on first run."
+  exit 0
+fi
+
+# ─── Build if missing ───────────────────────────────────────────────────────
+if [[ ! -x "$BINARY" ]]; then
+  echo "[bcli] Building Rust client (first run)..."
+  if [[ -z "$CARGO" ]]; then
+    echo "[bcli] ERROR: Rust/Cargo not found. Install Rust: https://rustup.rs"
+    exit 1
+  fi
+  cd "$CLIENT_DIR" && cargo build --release 2>&1 | sed 's/^/       /'
+  echo "[bcli] Build complete."
+fi
+
+# ─── Optional: start server daemon ──────────────────────────────────────────
+if [[ "$1" == "--server" ]]; then
+  shift
+  URL="${1:-https://example.com}"
+  echo "[bcli] Starting background server..."
+  set -- -u "$URL"
+  node "$REPO_DIR/server/index.js" --url "$URL" &
+  SERVER_PID=$!
+  echo "[bcli] Server PID: $SERVER_PID"
+  sleep 2
+  trap "kill $SERVER_PID 2>/dev/null; exit" INT TERM EXIT
+fi
+
+# ─── Run ────────────────────────────────────────────────────────────────────
+exec "$BINARY" "$@"

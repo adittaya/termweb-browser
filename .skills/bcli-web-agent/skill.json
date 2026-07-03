@@ -1,0 +1,15 @@
+{
+  "name": "bcli-web-agent",
+  "description": "Teaches AI agents how to use BCLI as their web browser — navigate, read pages, click, type, extract data, and solve captchas from the terminal.",
+  "author": "TermWeb",
+  "version": "1.0.0",
+  "models": ["claude-code", "codex-cli", "opencode", "aider", "gemini-cli", "cursor"],
+  "triggers": [
+    "browse",
+    "web research",
+    "scrape",
+    "captcha",
+    "web automation",
+    "browser"
+  ]
+}

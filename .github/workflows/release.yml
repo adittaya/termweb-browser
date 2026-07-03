@@ -1,0 +1,195 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v1.0.0)'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  # ─── Build Rust client for all platforms ─────────────────────────────────
+  rust-client:
+    name: "Rust client — ${{ matrix.target }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: linux-x64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: linux-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: windows-x64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: macos-x64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation deps (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build client
+        run: cargo build --release --target ${{ matrix.target }}
+        working-directory: client-rs
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bcli-${{ matrix.archive }}
+          path: client-rs/target/${{ matrix.target }}/release/bcli${{ matrix.target == 'x86_64-pc-windows-msvc' && '.exe' || '' }}
+          if-no-files-found: error
+
+  # ─── Bundle Node.js server with pkg ─────────────────────────────────────
+  server-bundle:
+    name: "Server — ${{ matrix.archive }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: node22-linux-x64
+            os: ubuntu-latest
+            archive: linux-x64
+          - target: node22-linux-arm64
+            os: ubuntu-latest
+            archive: linux-arm64
+          - target: node22-win-x64
+            os: windows-latest
+            archive: windows-x64
+          - target: node22-macos-x64
+            os: macos-latest
+            archive: macos-x64
+          - target: node22-macos-arm64
+            os: macos-latest
+            archive: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci --omit=optional
+
+      - name: Bundle with pkg
+        run: npx -y @yao-pkg/pkg package.json --targets ${{ matrix.target }} --output dist/termweb-server --compress GZip
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.archive }}
+          path: dist/termweb-server${{ matrix.target == 'node22-win-x64' && '.exe' || '' }}
+          if-no-files-found: error
+
+  # ─── Assemble release archives ──────────────────────────────────────────
+  assemble:
+    name: "Assemble — ${{ matrix.archive }}"
+    needs: [rust-client, server-bundle]
+    strategy:
+      fail-fast: false
+      matrix:
+        archive: [linux-x64, linux-arm64, windows-x64, macos-x64, macos-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Rust client
+        uses: actions/download-artifact@v4
+        with:
+          name: bcli-${{ matrix.archive }}
+          path: assemble/
+
+      - name: Download server bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: server-${{ matrix.archive }}
+          path: assemble/
+
+      - name: Copy additional assets
+        run: |
+          cp bin/bai assemble/
+          cp scripts/download-chrome.js assemble/
+          cp scripts/termweb-launcher.sh assemble/termweb
+          chmod +x assemble/bai assemble/download-chrome.js assemble/termweb
+
+      - name: Package archive
+        run: |
+          cd assemble
+          if [ "${{ matrix.archive }}" = "windows-x64" ]; then
+            zip -r "../termweb-${{ matrix.archive }}.zip" ./*
+          else
+            tar czf "../termweb-${{ matrix.archive }}.tar.gz" ./*
+          fi
+
+      - name: Upload release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.archive }}
+          path: termweb-${{ matrix.archive }}.tar.gz
+
+  # ─── Create GitHub Release ──────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: assemble
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Generate release notes
+        run: |
+          printf '# TermWeb Browser\n\n' > notes.md
+          printf 'Terminal-based background web browser and automation tool.\n\n' >> notes.md
+          printf '## Downloads\n\n' >> notes.md
+          printf '| Platform | Archive |\n' >> notes.md
+          printf '|----------|---------|\n' >> notes.md
+          printf '| Linux x86_64 | termweb-linux-x64.tar.gz |\n' >> notes.md
+          printf '| Linux ARM64 | termweb-linux-arm64.tar.gz |\n' >> notes.md
+          printf '| Windows x64 | termweb-windows-x64.zip |\n' >> notes.md
+          printf '| macOS x64 | termweb-macos-x64.tar.gz |\n' >> notes.md
+          printf '| macOS ARM64 | termweb-macos-arm64.tar.gz |\n' >> notes.md
+          printf '\n' >> notes.md
+          printf '## One-line install\n\n' >> notes.md
+          printf 'curl -fsSL https://raw.githubusercontent.com/anomalyco/termweb-browser/main/scripts/install.sh | bash\n' >> notes.md
+          printf '\n## Usage\n\n' >> notes.md
+          printf 'termweb --server --url https://example.com\n' >> notes.md
+          printf '\n## What is included\n\n' >> notes.md
+          printf '  - bcli - Terminal browser TUI (Rust, Kitty/Sixel graphics)\\n' >> notes.md
+          printf '  - termweb-server - Headless browser daemon (standalone binary)\\n' >> notes.md
+          printf '  - bai - AI agent CLI (Python, REST API wrapper)\\n' >> notes.md
+          printf '  - download-chrome.js - Auto-downloads Chrome on first run\\n' >> notes.md
+          printf '  - termweb - Master launcher\\n' >> notes.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: notes.md
+          files: |
+            termweb-*.tar.gz
+            termweb-*.zip
+          generate_release_notes: true

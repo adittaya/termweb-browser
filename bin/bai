@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""
+BAI — Browser AI Agent CLI
+===========================
+A text-based CLI for AI agents to interact with the browser.
+No terminal graphics needed. Everything is JSON/text.
+
+AI agents can use this to:
+  - See what's on the page (text content)
+  - Find clickable elements
+  - Click, type, navigate
+  - Extract links and data
+  - Execute custom JavaScript
+
+Usage:
+  bai status                    → Session status
+  bai text                      → Page text content
+  bai page                      → Full page (text + links + elements)
+  bai links                     → All links on the page
+  bai buttons                   → All clickable/interactive elements
+  bai forms                     → All form fields
+  bai html                      → Simplified HTML structure
+  bai navigate <url>            → Go to a URL
+  bai click <selector>          → Click an element by CSS selector
+  bai click-xy <x> <y>          → Click at pixel coordinates
+  bai type <selector> <text>    → Type text into an element
+  bai scroll <dy>               → Scroll vertically
+  bai eval <code>               → Execute JavaScript
+  bai screenshot                → Get base64 screenshot
+  bai wait [ms]                 → Wait (default 1000ms)
+  bai wait-for <selector> [ms]  → Wait for element
+
+The AI API runs on the browser server at port 9222.
+"""
+
+import json
+import os
+import sys
+import urllib.request
+import urllib.error
+import base64
+
+BASE_URL = os.environ.get("BAI_URL", "http://127.0.0.1:9222")
+TIMEOUT = 30
+
+
+def api(path, method="GET", body=None):
+    url = f"{BASE_URL}{path}"
+    data = json.dumps(body).encode() if body else None
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method=method,
+        headers={"Content-Type": "application/json"} if data else {},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        return json.loads(e.read()) if e.code != 503 else {"error": "Server not ready"}
+    except urllib.error.URLError:
+        return {"error": f"Cannot connect to {BASE_URL}"}
+
+
+def cmd_status():
+    result = api("/ai/status")
+    if "error" in result:
+        print(f"ERROR: {result['error']}")
+        return
+    print(f"Status:     {'Connected' if result.get('connected') else 'Disconnected'}")
+    print(f"URL:        {result.get('url', 'N/A')}")
+    print(f"Title:      {result.get('title', 'N/A')}")
+    print(f"Viewport:   {result.get('viewport', {}).get('width', '?')}x{result.get('viewport', {}).get('height', '?')}")
+    print(f"Session ID: {result.get('sessionId', 'N/A')}")
+    print(f"Tabs:       {len(result.get('tabs', []))}")
+
+
+def cmd_text():
+    result = api("/ai/text")
+    if "error" in result:
+        print(f"ERROR: {result['error']}")
+        return
+    print(f"URL: {result.get('url', '?')}\n")
+    print(result.get("text", "(empty)"))
+
+
+def cmd_page():
+    result = api("/ai/page")
+    if "error" in result:
+        print(f"ERROR: {result['error']}")
+        return
+    print(f"URL:   {result.get('url', '?')}")
+    print(f"Title: {result.get('title', '?')}")
+    print(f"Links: {result.get('linkCount', 0)}  Elements: {result.get('elementCount', 0)}")
+    print(f"Text length: {result.get('textLength', 0)} chars\n")
+
+    print("─── TEXT CONTENT ───")
+    print(result.get("text", "(empty)")[:5000])
+    if result.get("textLength", 0) > 5000:
+        print(f"\n... (truncated, {result['textLength']} total chars)")
+
+    print("\n─── INTERACTIVE ELEMENTS ───")
+    for el in (result.get("interactives") or [])[:30]:
+        rect = el.get("rect", {})
+        print(f"  [{el['tag']}] \"{el['text']}\"  →  {el['selector']}  ({rect.get('x','?')},{rect.get('y','?')})")
+
+    print("\n─── LINKS (first 20) ───")
+    for link in (result.get("links") or [])[:20]:
+        print(f"  \"{link['text']}\"  →  {link['href']}")
+
+
+def cmd_links():
+    result = api("/ai/links")
+    if "error" in result:
+        print(f"ERROR: {result['error']}")
+        return
+    print(f"URL: {result.get('url', '?')}  |  {result.get('count', 0)} links\n")
+    for link in result.get("links", []):
+        print(f"  \"{link['text']}\"  →  {link['href']}")
+
+
+def cmd_buttons():
+    result = api("/ai/buttons")
+    if "error" in result:
+        print(f"ERROR: {result['error']}")
+        return
+    print(f"URL: {result.get('url', '?')}  |  {result.get('count', 0)} elements\n")
+    for el in result.get("elements", []):
+        rect = el.get("rect", {})
+        print(f"  [{el['tag']}] \"{el['text']}\"")
+        print(f"        Selector: {el['selector']}")
+        print(f"        Position: ({rect.get('x','?')}, {rect.get('y','?')})  {rect.get('width','?')}x{rect.get('height','?')}")
+        if el.get("attributes", {}).get("href"):
+            print(f"        href: {el['attributes']['href']}")
+        print()
+
+
+def cmd_forms():
+    result = api("/ai/forms")
+    if "error" in result:
+        print(f"ERROR: {result['error']}")
+        return
+    print(f"URL: {result.get('url', '?')}  |  {result.get('count', 0)} forms\n")
+    for form in result.get("forms", []):
+        print(f"  Form: action={form['action']}  method={form['method']}")
+        for field in form.get("fields", []):
+            opts = ""
+            if field.get("options"):
+                opts = f"  options={len(field['options'])}"
+            print(f"    [{field['tag']}:{field['type']}] name={field['name']} placeholder={field['placeholder']}{opts}")
+        print()
+
+
+def cmd_html():
+    result = api("/ai/html")
+    if "error" in result:
+        print(f"ERROR: {result['error']}")
+        return
+    print(json.dumps(result.get("html", {}), indent=2)[:5000])
+
+
+def cmd_navigate(args):
+    url = args[0] if args else input("URL: ")
+    result = api("/ai/navigate", "POST", {"url": url})
+    print(json.dumps(result, indent=2))
+
+
+def cmd_click(args):
+    selector = " ".join(args) if args else input("CSS selector: ")
+    result = api("/ai/click", "POST", {"selector": selector})
+    print(json.dumps(result, indent=2))
+
+
+def cmd_click_xy(args):
+    if len(args) < 2:
+        print("Usage: bai click-xy <x> <y>")
+        return
+    x, y = int(args[0]), int(args[1])
+    result = api("/ai/click", "POST", {"x": x, "y": y})
+    print(json.dumps(result, indent=2))
+
+
+def cmd_type(args):
+    if len(args) < 2:
+        print("Usage: bai type <selector> <text>")
+        return
+    selector = args[0]
+    text = " ".join(args[1:])
+    result = api("/ai/type", "POST", {"selector": selector, "text": text})
+    print(json.dumps(result, indent=2))
+
+
+def cmd_scroll(args):
+    dy = int(args[0]) if args else 300
+    result = api("/ai/scroll", "POST", {"delta_y": dy})
+    print(json.dumps(result, indent=2))
+
+
+def cmd_eval(args):
+    code = " ".join(args) if args else input("JavaScript: ")
+    result = api("/ai/evaluate", "POST", {"code": code})
+    r = result.get("result")
+    if r is not None:
+        print(json.dumps(r, indent=2) if not isinstance(r, str) else r)
+    else:
+        print(json.dumps(result, indent=2))
+
+
+def cmd_screenshot():
+    result = api("/ai/screenshot", "POST")
+    if "error" in result:
+        print(f"ERROR: {result['error']}")
+        return
+    data = result.get("data", "")
+    path = f"bai_screenshot_{int(__import__('time').time())}.jpg"
+    with open(path, "wb") as f:
+        f.write(base64.b64decode(data))
+    print(f"Screenshot saved to: {path}  ({result.get('width','?')}x{result.get('height','?')})")
+
+
+def cmd_wait(args):
+    ms = int(args[0]) if args else 1000
+    result = api("/ai/wait", "POST", {"ms": ms})
+    print(json.dumps(result, indent=2))
+
+
+def cmd_wait_for(args):
+    if not args:
+        print("Usage: bai wait-for <selector> [timeout_ms]")
+        return
+    selector = args[0]
+    ms = int(args[1]) if len(args) > 1 else 5000
+    result = api("/ai/wait", "POST", {"selector": selector, "ms": ms})
+    print(json.dumps(result, indent=2))
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print(__doc__)
+        return
+
+    cmd = sys.argv[1]
+    args = sys.argv[2:]
+    commands = {
+        "status": cmd_status,
+        "text": cmd_text,
+        "page": cmd_page,
+        "links": cmd_links,
+        "buttons": cmd_buttons,
+        "forms": cmd_forms,
+        "html": cmd_html,
+        "navigate": lambda: cmd_navigate(args),
+        "click": lambda: cmd_click(args),
+        "click-xy": lambda: cmd_click_xy(args),
+        "type": lambda: cmd_type(args),
+        "scroll": lambda: cmd_scroll(args),
+        "eval": lambda: cmd_eval(args),
+        "screenshot": lambda: cmd_screenshot(),
+        "wait": lambda: cmd_wait(args),
+        "wait-for": lambda: cmd_wait_for(args),
+    }
+
+    if cmd in commands:
+        commands[cmd]()
+    else:
+        print(f"Unknown command: {cmd}")
+        print("Run 'bai --help' for usage.")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

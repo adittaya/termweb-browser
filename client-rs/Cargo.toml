@@ -1,0 +1,58 @@
+[package]
+name = "bcli"
+version = "1.0.0"
+edition = "2021"
+description = "BCLI — Terminal Browser Viewer with ratatui + Kitty/Sixel graphics"
+
+[[bin]]
+name = "bcli"
+path = "src/main.rs"
+
+[dependencies]
+# TUI framework — immediate-mode, flicker-free rendering
+ratatui = "0.30"
+
+# Terminal image rendering via Kitty/Sixel protocol
+ratatui-image = { version = "0.10", features = ["crossterm"] }
+
+# Terminal raw mode, mouse capture, keyboard input
+crossterm = { version = "0.29", features = ["event-stream"] }
+
+# Async runtime for WebSocket + event loop
+tokio = { version = "1", features = ["full"] }
+
+# WebSocket client (async)
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+
+# Async stream combinators
+futures-util = "0.3"
+futures-channel = "0.3"
+
+# JSON serialization/deserialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Base64 decode for screenshot frames
+base64 = "0.22"
+
+# Image loading for ratatui-image
+image = "0.24"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# UUID generation for session IDs
+uuid = { version = "1", features = ["v4"] }
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

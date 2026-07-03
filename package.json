@@ -1,0 +1,57 @@
+{
+  "name": "termweb-browser",
+  "version": "1.0.0",
+  "description": "Terminal-Based Background Web Browser & Automation Tool",
+  "main": "server/index.js",
+  "bin": {
+    "termweb-server": "./server/index.js",
+    "bcli": "./bin/bcli",
+    "bai": "./bin/bai"
+  },
+  "scripts": {
+    "server": "node server/index.js",
+    "start": "node server/index.js",
+    "bcli": "./bin/bcli",
+    "install:global": "node bin/install.js",
+    "build:bcli": "cd client-rs && cargo build --release",
+    "build:server": "npx -y @yao-pkg/pkg . --output dist/termweb-server --compress GZip",
+    "build:release": "bash scripts/build-release.sh",
+    "prebuild:server": "npm ci --omit=optional"
+  },
+  "pkg": {
+    "assets": [
+      "server/**/*.js",
+      "shared/**/*.js",
+      "config/**/*.js",
+      "bin/bai"
+    ],
+    "scripts": [
+      "server/**/*.js"
+    ]
+  },
+  "dependencies": {
+    "commander": "^11.1.0",
+    "puppeteer-core": "^21.6.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "ws": "^8.16.0"
+  },
+  "optionalDependencies": {
+    "sixel": "^0.16.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "terminal",
+    "browser",
+    "headless",
+    "puppeteer",
+    "sixel",
+    "kitty",
+    "captcha",
+    "automation",
+    "ratatui"
+  ],
+  "license": "MIT"
+}
