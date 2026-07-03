@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="anomalyco/termweb-browser"
+REPO="adittaya/termweb-browser"
 REPO_URL="https://github.com/${REPO}"
 VERSION="${1:-latest}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
@@ -425,8 +425,8 @@ show_help() {
 TermWeb Browser — One-line Installer
 
 Usage:
-  curl -fsSL https://raw.githubusercontent.com/anomalyco/termweb-browser/main/scripts/install.sh | bash
-  curl -fsSL https://raw.githubusercontent.com/anomalyco/termweb-browser/main/scripts/install.sh | bash -s v1.0.0
+  curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/main/scripts/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/main/scripts/install.sh | bash -s v1.0.0
 
 Environment variables:
   INSTALL_DIR    Binary installation directory (default: ~/.local/bin)

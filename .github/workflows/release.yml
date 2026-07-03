@@ -175,7 +175,7 @@ jobs:
           printf '| macOS ARM64 | termweb-macos-arm64.tar.gz |\n' >> notes.md
           printf '\n' >> notes.md
           printf '## One-line install\n\n' >> notes.md
-          printf 'curl -fsSL https://raw.githubusercontent.com/anomalyco/termweb-browser/main/scripts/install.sh | bash\n' >> notes.md
+          printf 'curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/main/scripts/install.sh | bash\n' >> notes.md
           printf '\n## Usage\n\n' >> notes.md
           printf 'termweb --server --url https://example.com\n' >> notes.md
           printf '\n## What is included\n\n' >> notes.md

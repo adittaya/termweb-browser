@@ -78,7 +78,7 @@ copy_assets() {
     cat > "${DIST_DIR}/${dir_name}/README.txt" << README
 TermWeb Browser ${VERSION}
 ==========================
-See https://github.com/anomalyco/termweb-browser
+See https://github.com/adittaya/termweb-browser
 
 Quick start:
   ./termweb-server --url https://example.com   # Terminal 1: start server
