@@ -30,7 +30,20 @@ detect_arch() {
         *) err "Unsupported architecture: $(uname -m)" ;;
     esac
 }
-detect_platform() { echo "$(detect_arch)-$(detect_os)"; }
+detect_release_tag() {
+    local arch os
+    arch=$(detect_arch)
+    os=$(detect_os)
+    case "${os}-${arch}" in
+        linux-x86_64)  echo "linux-x64" ;;
+        linux-aarch64) echo "linux-arm64" ;;
+        macos-x86_64)  echo "macos-x64" ;;
+        macos-aarch64) echo "macos-arm64" ;;
+        windows-x86_64) echo "windows-x64" ;;
+        windows-aarch64) echo "windows-arm64" ;;
+        *) err "No release for ${arch}-${os}" ;;
+    esac
+}
 
 # ─── Sudo helper (skip if root or sudo missing) ──────────────────────────────────
 maybe_sudo() {
@@ -474,8 +487,8 @@ main() {
     local os arch platform
     os=$(detect_os)
     arch=$(detect_arch)
-    platform="${arch}-${os}"
-    info "Detected: ${platform}"
+    platform=$(detect_release_tag)
+    info "Detected: ${arch}-${os} → ${platform}"
 
     install_system_deps
     check_prereqs
