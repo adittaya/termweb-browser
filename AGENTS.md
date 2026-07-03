@@ -92,15 +92,29 @@ Messages are `{ type, payload, _t }` JSON over WebSocket.
 
 The Rust `protocol.rs` **must always mirror** `shared/protocol.js`. If you add a message type to one, add it to the other.
 
-## Global Command: BCLI
+## Installation
 
-The binary is named `bcli`. Install globally with:
+### One-liner (recommended)
 
 ```bash
-node bin/install.js                    # installs to ~/.local/bin/bcli
-node bin/install.js /usr/local         # installs to /usr/local/bin/bcli
+curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/main/install.sh | bash
+```
 
-# Or via npm (auto-installs bin/bcli into PATH):
+Auto-installs Node.js (via nvm), Rust (via rustup), Chrome, and all commands into `~/.local/bin`.
+
+### Manual
+
+```bash
+# Clone and install
+git clone https://github.com/adittaya/termweb-browser.git
+cd termweb-browser
+npm install
+
+# Symlink into PATH
+node bin/install.js                    # ~/.local/bin/bcli
+node bin/install.js /usr/local         # /usr/local/bin/bcli
+
+# Or via npm:
 npm link
 ```
 

@@ -23,6 +23,16 @@ A practical guide to building reliable browser automations with TermWeb's REST A
 
 ## Quick Start
 
+### One-line install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/main/install.sh | bash
+```
+
+Installs everything: Node.js, Rust, Chrome, and the `termweb`, `bcli`, `bai`, `termweb-server` commands.
+
+### Try it out
+
 ```bash
 # 1. Start the server (auto-creates a browser session)
 termweb-server --url https://example.com
@@ -678,6 +688,12 @@ If you start the server without `--url`, no session exists until a WS client con
 ## Configuration
 
 ### Environment variables
+
+### One-liner install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/main/install.sh | bash
+```
 
 | Variable | Default | Description |
 |----------|---------|-------------|
