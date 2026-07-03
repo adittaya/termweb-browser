@@ -58,6 +58,10 @@ const opts = {
   proxy: process.argv.includes('--proxy')
     ? process.argv[process.argv.indexOf('--proxy') + 1]
     : null,
+  chrome: process.argv.includes('--chrome')
+    ? process.argv[process.argv.indexOf('--chrome') + 1]
+    : null,
+  noAutoSession: process.argv.includes('--no-auto-session'),
 };
 
 // ─── WebSocket Server ─────────────────────────────────────────────────────
@@ -104,7 +108,7 @@ const server = http.createServer((req, res) => {
 
   // AI API
   if (url.pathname.startsWith('/ai/')) {
-    return handleAIRequest(req, res, () => defaultSession);
+    return handleAIRequest(req, res, () => defaultSession, (s) => { defaultSession = s; if (s) sessions.set(s.sessionId, s); else sessions.clear(); });
   }
 
   // 404
@@ -408,21 +412,51 @@ function resolveActivePage(tabId) {
   return page || null;
 }
 
+// ─── Auto-Create Session ─────────────────────────────────────────────────
+
+async function createAutoSession() {
+  if (opts.noAutoSession) {
+    console.log('[+] Auto-session creation disabled. REST API will wait for first WS client.');
+    return;
+  }
+  try {
+    console.log('[+] Creating browser session for automation...');
+    if (opts.chrome) config.browser.executablePath = opts.chrome;
+    defaultSession = await createSession(`session_${Date.now()}`, {
+      viewport: { width: opts.width, height: opts.height },
+      userDataDir: opts.dataDir,
+      proxyServer: opts.proxy,
+    });
+    if (opts.url && opts.url !== 'about:blank') {
+      await defaultSession.navigate(opts.url).catch(() => {});
+    }
+    sessions.set(defaultSession.sessionId, defaultSession);
+    console.log(`[+] Browser session created: ${defaultSession.sessionId}`);
+  } catch (err) {
+    console.error('[!] Failed to create auto-session:', err.message);
+    console.log('[+] Server will create session on first WS client connection.');
+  }
+}
+
 // ─── Startup ──────────────────────────────────────────────────────────────
 
-server.listen(opts.port, opts.host, () => {
+server.listen(opts.port, opts.host, async () => {
   console.log('');
   console.log('╔══════════════════════════════════════════════╗');
   console.log('║   TermWeb Browser Server                     ║');
-  console.log(`║   WebSocket: ws://${opts.host}:${opts.port}${config.server.wsPath}       ║`);
-  console.log(`║   Health:    http://${opts.host}:${opts.port}/health           ║`);
-  console.log(`║   Sessions:  http://${opts.host}:${opts.port}/sessions         ║`);
-  console.log(`║   Startup URL: ${opts.url.padEnd(45).slice(0, 45)}║`);
+  console.log(`║   REST API: http://${opts.host}:${opts.port}/ai/*              ║`);
+  console.log(`║   WebSocket: ws://${opts.host}:${opts.port}${config.server.wsPath}  ║`);
+  console.log(`║   Sessions:  http://${opts.host}:${opts.port}/sessions  ║`);
+  console.log(`║   Health:    http://${opts.host}:${opts.port}/health    ║`);
   console.log('╚══════════════════════════════════════════════╝');
   console.log('');
-  console.log('[+] Server is running. Connect your terminal client:');
-  console.log(`    node client/index.js --connect ws://${opts.host}:${opts.port}${config.server.wsPath}`);
+  console.log('[+] Server is running. Automation ready at:');
+  console.log(`    bai status    — check session`);
+  console.log(`    bai navigate https://example.com`);
+  console.log(`    bai page      — view page content`);
   console.log('');
+
+  await createAutoSession();
 });
 
 // ─── Config Hot-Reload ────────────────────────────────────────────────────

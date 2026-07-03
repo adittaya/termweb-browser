@@ -41,7 +41,7 @@ const { URL } = require('url');
  * @param {http.ServerResponse} res
  * @param {Function} getSession  — returns the active BrowserSession
  */
-async function handleAIRequest(req, res, getSession) {
+async function handleAIRequest(req, res, getSession, setSession) {
 
   // ─── Helper: Extract clean text from the page ─────────────────────────
   async function extractPageText(page) {
@@ -280,6 +280,8 @@ async function handleAIRequest(req, res, getSession) {
     'POST /ai/evaluate':  route_body(handleEvaluate),
     'POST /ai/screenshot': route_body(handleScreenshot),
     'POST /ai/wait':      route_body(handleWait),
+    'GET /ai/session':    route_noarg(handleGetSession),
+    'POST /ai/session':   route_body(handlePostSession),
   };
 
   // Route the request
@@ -289,7 +291,7 @@ async function handleAIRequest(req, res, getSession) {
   const handler = routes[key];
 
   if (handler) {
-    return handler(req, res, getSession);
+    return handler(req, res, getSession, setSession);
   }
 
   // 404 for unknown /ai/ paths
@@ -301,7 +303,7 @@ async function handleAIRequest(req, res, getSession) {
   function route_noarg(fn) {
     return async (req, res, getSession) => {
       const session = getSession();
-      if (!session) return sendJSON(res, 503, { error: 'No active browser session' });
+      if (!session) return sendJSON(res, 503, { error: 'No active browser session. Start server with --url or connect via WS first.' });
       const page = session._resolvePage();
       if (!page) return sendJSON(res, 503, { error: 'No active page' });
       try {
@@ -313,11 +315,11 @@ async function handleAIRequest(req, res, getSession) {
   }
 
   function route_body(fn) {
-    return async (req, res, getSession) => {
+    return async (req, res, getSession, setSession) => {
       const session = getSession();
-      if (!session) return sendJSON(res, 503, { error: 'No active browser session' });
-      const page = session._resolvePage();
-      if (!page) return sendJSON(res, 503, { error: 'No active page' });
+      if (!session && fn.name !== 'handlePostSession') return sendJSON(res, 503, { error: 'No active browser session. Start server with --url or connect via WS first.' });
+      const page = session && session._resolvePage ? session._resolvePage() : null;
+      if (!page && fn.name !== 'handlePostSession' && fn.name !== 'handleGetSession') return sendJSON(res, 503, { error: 'No active page' });
       try {
         const body = await parseBody(req);
         await fn(req, res, session, page, body);
@@ -473,6 +475,48 @@ async function handleAIRequest(req, res, getSession) {
     } else {
       await new Promise(r => setTimeout(r, ms));
       sendJSON(res, 200, { waited: true, duration: ms });
+    }
+  }
+
+  // ─── Session Management ────────────────────────────────────────────
+  async function handleGetSession(req, res, session, page) {
+    if (!session) return sendJSON(res, 200, { active: false, sessionId: null });
+    sendJSON(res, 200, {
+      active: true,
+      sessionId: session.sessionId,
+      viewport: session.viewport,
+      url: (page && page.url && page.url()) || 'about:blank',
+      title: (page && page.title && (await page.title().catch(() => ''))) || '',
+      tabs: session.getTabsInfo(),
+    });
+  }
+
+  async function handlePostSession(req, res, _session, _page, body) {
+    const { createSession } = require('./browser');
+    const action = body.action || 'status';
+    if (action === 'create') {
+      try {
+        const newSession = await createSession(`session_${Date.now()}`, {
+          viewport: body.viewport || { width: 1280, height: 720 },
+        });
+        if (body.url && body.url !== 'about:blank') {
+          await newSession.navigate(body.url).catch(() => {});
+        }
+        if (setSession) setSession(newSession);
+        sendJSON(res, 200, { created: true, sessionId: newSession.sessionId });
+      } catch (err) {
+        sendJSON(res, 500, { error: `Session creation failed: ${err.message}` });
+      }
+    } else if (action === 'destroy') {
+      const sess = getSession();
+      if (sess) {
+        await sess.close().catch(() => {});
+        if (setSession) setSession(null);
+      }
+      sendJSON(res, 200, { destroyed: true });
+    } else {
+      const sess = getSession();
+      sendJSON(res, 200, { active: !!sess, sessionId: sess ? sess.sessionId : null });
     }
   }
 }

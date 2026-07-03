@@ -11,6 +11,7 @@ AI agents can use this to:
   - Click, type, navigate
   - Extract links and data
   - Execute custom JavaScript
+  - Run automation playbooks
 
 Usage:
   bai status                    → Session status
@@ -26,9 +27,11 @@ Usage:
   bai type <selector> <text>    → Type text into an element
   bai scroll <dy>               → Scroll vertically
   bai eval <code>               → Execute JavaScript
-  bai screenshot                → Get base64 screenshot
+  bai screenshot [path]         → Save screenshot
   bai wait [ms]                 → Wait (default 1000ms)
   bai wait-for <selector> [ms]  → Wait for element
+  bai session [create|destroy]  → Manage browser session
+  bai run <file.json>           → Execute automation playbook
 
 The AI API runs on the browser server at port 9222.
 """
@@ -36,30 +39,37 @@ The AI API runs on the browser server at port 9222.
 import json
 import os
 import sys
+import time
 import urllib.request
 import urllib.error
 import base64
 
 BASE_URL = os.environ.get("BAI_URL", "http://127.0.0.1:9222")
 TIMEOUT = 30
+RETRIES = 3
 
 
-def api(path, method="GET", body=None):
+def api(path, method="GET", body=None, retries=RETRIES):
     url = f"{BASE_URL}{path}"
     data = json.dumps(body).encode() if body else None
-    req = urllib.request.Request(
-        url,
-        data=data,
-        method=method,
-        headers={"Content-Type": "application/json"} if data else {},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        return json.loads(e.read()) if e.code != 503 else {"error": "Server not ready"}
-    except urllib.error.URLError:
-        return {"error": f"Cannot connect to {BASE_URL}"}
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(
+                url,
+                data=data,
+                method=method,
+                headers={"Content-Type": "application/json"} if data else {},
+            )
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return json.loads(e.read()) if e.code != 503 else {"error": "Server not ready"}
+        except urllib.error.URLError:
+            if attempt < retries - 1:
+                time.sleep(1)
+                continue
+            return {"error": f"Cannot connect to {BASE_URL}"}
+    return {"error": "Max retries exceeded"}
 
 
 def cmd_status():
@@ -206,13 +216,13 @@ def cmd_eval(args):
         print(json.dumps(result, indent=2))
 
 
-def cmd_screenshot():
+def cmd_screenshot(args):
     result = api("/ai/screenshot", "POST")
     if "error" in result:
         print(f"ERROR: {result['error']}")
         return
     data = result.get("data", "")
-    path = f"bai_screenshot_{int(__import__('time').time())}.jpg"
+    path = args[0] if args else f"bai_screenshot_{int(time.time())}.jpg"
     with open(path, "wb") as f:
         f.write(base64.b64decode(data))
     print(f"Screenshot saved to: {path}  ({result.get('width','?')}x{result.get('height','?')})")
@@ -232,6 +242,66 @@ def cmd_wait_for(args):
     ms = int(args[1]) if len(args) > 1 else 5000
     result = api("/ai/wait", "POST", {"selector": selector, "ms": ms})
     print(json.dumps(result, indent=2))
+
+
+def cmd_session(args):
+    action = args[0] if args else "status"
+    result = api("/ai/session", "POST", {"action": action})
+    if "error" in result:
+        print(f"ERROR: {result['error']}")
+        return
+    if action == "create":
+        print(f"Session created: {result.get('sessionId', '?')}")
+    elif action == "destroy":
+        print("Session destroyed")
+    else:
+        print(f"Session active: {result.get('active', False)}")
+        if result.get("sessionId"):
+            print(f"Session ID: {result['sessionId']}")
+
+
+def cmd_run(args):
+    """Execute an automation playbook from a JSON file."""
+    if not args:
+        print("Usage: bai run <playbook.json>")
+        return
+    path = args[0]
+    if not os.path.exists(path):
+        print(f"ERROR: File not found: {path}")
+        return
+    try:
+        with open(path) as f:
+            playbook = json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"ERROR: Invalid JSON: {e}")
+        return
+    steps = playbook.get("steps", playbook if isinstance(playbook, list) else [])
+    if not steps:
+        print("ERROR: Playbook has no steps")
+        return
+    print(f"Running playbook: {playbook.get('name', path)} ({len(steps)} steps)")
+    for i, step in enumerate(steps):
+        action = step.get("action", step.get("type", ""))
+        params = {k: v for k, v in step.items() if k not in ("action", "type")}
+        print(f"\n  [{i+1}/{len(steps)}] {action} {json.dumps(params)[:80]}")
+        result = api(f"/ai/{action}", "POST", params)
+        if "error" in result:
+            print(f"  ERROR: {result['error']}")
+            if step.get("optional"):
+                print("  (optional, continuing)")
+            else:
+                sys.exit(1)
+        else:
+            # Print relevant result fields
+            if "found" in result:
+                print(f"  found={result['found']}")
+            if "url" in result:
+                print(f"  url={result.get('url', result.get('title', ''))}")
+            if "clicked" in result:
+                print(f"  clicked={result.get('selector', '')}")
+            if "text" in result and action == "wait":
+                print(f"  waited={result.get('duration', '?')}ms")
+    print(f"\nPlaybook complete ({len(steps)} steps)")
 
 
 def main():
@@ -255,9 +325,11 @@ def main():
         "type": lambda: cmd_type(args),
         "scroll": lambda: cmd_scroll(args),
         "eval": lambda: cmd_eval(args),
-        "screenshot": lambda: cmd_screenshot(),
+        "screenshot": lambda: cmd_screenshot(args),
         "wait": lambda: cmd_wait(args),
         "wait-for": lambda: cmd_wait_for(args),
+        "session": lambda: cmd_session(args),
+        "run": lambda: cmd_run(args),
     }
 
     if cmd in commands:

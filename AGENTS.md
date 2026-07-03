@@ -156,6 +156,8 @@ GET  /ai/links       — All links on the page
 GET  /ai/buttons     — All clickable elements with CSS selectors
 GET  /ai/forms       — All form fields
 GET  /ai/html        — Simplified HTML tree structure
+GET  /ai/session     — Session info (active, URL, title, tabs)
+POST /ai/session     — { action: "create"|"destroy"|"status" } optional { url, viewport }
 POST /ai/navigate    — { url: "https://..." }
 POST /ai/click       — { selector: "#button" } or { x: 100, y: 200 }
 POST /ai/type        — { selector: "#input", text: "hello" }
@@ -182,9 +184,11 @@ bai click-xy 500 300          # Click at pixel coords
 bai type "#search" "query"    # Type into element
 bai scroll 500                # Scroll down
 bai eval "document.title"     # Run JavaScript
-bai screenshot                # Save screenshot to file
+bai screenshot [path]         # Save screenshot to file
 bai wait 2000                 # Wait 2 seconds
 bai wait-for "#loaded" 5000   # Wait for element
+bai session [create|destroy]  # Manage browser session
+bai run playbook.json         # Execute automation playbook
 ```
 
 ### Programmatic AI Integration (Python)
@@ -214,6 +218,27 @@ result = ai("GET", "/ai/text")
 print(result["text"])
 ```
 
+### Automation Playbooks
+
+Run a sequence of steps from a JSON file with `bai run playbook.json`:
+
+```json
+{
+  "name": "Login to Example",
+  "steps": [
+    { "action": "navigate", "url": "https://example.com/login" },
+    { "action": "wait", "selector": "#email", "ms": 5000 },
+    { "action": "type", "selector": "#email", "text": "user@example.com" },
+    { "action": "type", "selector": "#password", "text": "s3cret" },
+    { "action": "click", "selector": "#login-btn" },
+    { "action": "wait", "text": "Dashboard", "ms": 10000 },
+    { "action": "screenshot" }
+  ]
+}
+```
+
+Steps are executed in order. Add `"optional": true` to non-critical steps to continue on error.
+
 ## Quick Reference — Key Files
 
 | File | Purpose | ~Lines |
@@ -221,8 +246,8 @@ print(result["text"])
 | `server/human-emulation.js` | Bezier path generation, human click/type | 328 |
 | `client/coord-translator.js` | Terminal → browser pixel math | 148 |
 | `server/anti-fingerprint.js` | Canvas/WebGL/audio spoofing | 132 |
-| `server/ai-api.js` | AI agent REST API (no-graphics mode) | 400+ |
-| `bin/bai` | AI agent CLI (Python, wraps REST API) | 230 |
+| `server/ai-api.js` | AI agent REST API (no-graphics mode) | 570+ |
+| `bin/bai` | AI agent CLI (Python, wraps REST API) | 300+ |
 | `client-rs/src/main.rs` | Async event loop, WS, ratatui | 423 |
 | `client-rs/src/display.rs` | ratatui-image frame rendering | 166 |
 | `client-rs/src/input.rs` | crossterm mouse/key parsing | 187 |
