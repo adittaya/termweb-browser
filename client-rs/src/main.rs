@@ -53,7 +53,7 @@ const PAGE_EXTRACT_JS: &str = r#"(function(){
 #[derive(Parser, Debug)]
 #[command(
     name = "bcli",
-    version = "1.1.0",
+    version = "1.1.1",
     about = "Terminal Browser — interactive TUI or direct CLI commands",
     long_about = "BCLI: Terminal browser with headless Chrome.\n\
         \x20 • Interactive mode (default): full TUI with mouse/keyboard\n\
