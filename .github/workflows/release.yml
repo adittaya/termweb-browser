@@ -141,11 +141,7 @@ jobs:
       - name: Package archive
         run: |
           cd assemble
-          if [ "${{ matrix.archive }}" = "windows-x64" ]; then
-            zip -r "../termweb-${{ matrix.archive }}.zip" ./*
-          else
-            tar czf "../termweb-${{ matrix.archive }}.tar.gz" ./*
-          fi
+          tar czf "../termweb-${{ matrix.archive }}.tar.gz" ./*
 
       - name: Upload release asset
         uses: actions/upload-artifact@v4
@@ -174,7 +170,7 @@ jobs:
           printf '|----------|---------|\n' >> notes.md
           printf '| Linux x86_64 | termweb-linux-x64.tar.gz |\n' >> notes.md
           printf '| Linux ARM64 | termweb-linux-arm64.tar.gz |\n' >> notes.md
-          printf '| Windows x64 | termweb-windows-x64.zip |\n' >> notes.md
+          printf '| Windows x64 | termweb-windows-x64.tar.gz |\n' >> notes.md
           printf '| macOS x64 | termweb-macos-x64.tar.gz |\n' >> notes.md
           printf '| macOS ARM64 | termweb-macos-arm64.tar.gz |\n' >> notes.md
           printf '\n' >> notes.md
