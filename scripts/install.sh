@@ -447,8 +447,8 @@ show_help() {
 TermWeb Browser — One-line Installer
 
 Usage:
-  curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/main/scripts/install.sh | bash
-  curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/main/scripts/install.sh | bash -s v1.0.0
+  curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/refs/heads/main/scripts/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/refs/heads/main/scripts/install.sh | bash -s v1.0.0
 
 Environment variables:
   INSTALL_DIR    Binary installation directory (default: ~/.local/bin)
