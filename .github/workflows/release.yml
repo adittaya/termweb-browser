@@ -1,4 +1,4 @@
-name: Build & Release
+name: 'Build & Release'
 
 on:
   push:
@@ -64,7 +64,7 @@ jobs:
   release:
     name: Release ${{ matrix.dir }}
     runs-on: ${{ matrix.os }}
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     strategy:
       fail-fast: false
       matrix:
@@ -129,8 +129,8 @@ jobs:
             --compress GZip
           echo "status=ok" >> "$GITHUB_OUTPUT"
 
-      - name: Fallback: copy server source
-        if: steps.bundle.outputs.status != 'ok'
+      - name: 'Fallback: copy server source'
+        if: ${{ steps.bundle.outputs.status != 'ok' }}
         shell: bash
         run: |
           mkdir -p dist/${{ matrix.dir }}/server dist/${{ matrix.dir }}/shared dist/${{ matrix.dir }}/config
@@ -212,7 +212,7 @@ jobs:
     name: Release Summary
     runs-on: ubuntu-22.04
     needs: release
-    if: always() && startsWith(github.ref, 'refs/tags/v')
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/v') }}
     steps:
       - name: Print release summary
         run: |
