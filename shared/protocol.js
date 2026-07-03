@@ -113,6 +113,10 @@ const MessageTypes = {
   // Find in page results
   FIND_RESULTS: 'findResults',
   // { text: string, found: boolean, count: number, tabId?: string }
+
+  // Result from evaluate command
+  EVALUATE_RESULT: 'evaluateResult',
+  // { result: any, tabId?: string }
 };
 
 

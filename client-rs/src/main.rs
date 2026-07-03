@@ -31,6 +31,9 @@ use protocol::{to_payload, Message, types};
 struct Args {
     #[arg(short = 'c', long = "connect", default_value = "ws://127.0.0.1:9222/browser")]
     connect: String,
+
+    #[arg(short = 'd', long = "dotted", help = "Text-only mode: render page as text with numbered links (no graphics)")]
+    dotted: bool,
 }
 
 #[tokio::main]
@@ -54,13 +57,21 @@ async fn main() -> Result<()> {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<String>(256);
     let (ws_tx, ws_rx) = mpsc::channel::<String>(64);
 
+    // In dotted mode, immediately request page text
+    if args.dotted {
+        let req = Message::new(types::EVALUATE, serde_json::json!({
+            "code": "JSON.stringify({text: document.body.innerText.slice(0,50000), links: Array.from(document.querySelectorAll('a[href]')).map(a => ({text: a.textContent.trim().slice(0,80), href: a.href})).filter(l => l.text && l.href)})"
+        }));
+        let _ = ws_tx.try_send(req.to_json());
+    }
+
     let running = Arc::new(AtomicBool::new(true));
 
     let (cols, rows) = {
         let size = terminal.size()?;
         (size.width, size.height)
     };
-    let mut state = DisplayState::new(cols, rows);
+    let mut state = DisplayState::new(cols, rows, args.dotted);
     state.connected = true;
 
     let ws_url = args.connect.clone();
@@ -82,7 +93,9 @@ async fn main() -> Result<()> {
         frame_interval.tick().await;
 
         while let Ok(bytes) = frame_rx.try_recv() {
-            if let Err(e) = state.set_image_from_jpeg(&bytes) {
+            if state.dotted {
+                // In dotted mode, skip image rendering, text fetched on navigate
+            } else if let Err(e) = state.set_image_from_jpeg(&bytes) {
                 log::warn!("Image decode error: {e}");
             }
         }
@@ -93,6 +106,14 @@ async fn main() -> Result<()> {
                     break 'main;
                 }
             }
+        }
+
+        // In dotted mode, request page text on every frame (navigation completed)
+        if state.dotted && state.page_text.is_empty() {
+            let req = Message::new(types::EVALUATE, serde_json::json!({
+                "code": "JSON.stringify({text: document.body.innerText.slice(0,50000), links: Array.from(document.querySelectorAll('a[href]')).map(a => ({text: a.textContent.trim().slice(0,80), href: a.href})).filter(l => l.text && l.href)})"
+            }));
+            let _ = ws_tx.try_send(req.to_json()).ok();
         }
 
         let _ = terminal.draw(|f| {
@@ -118,6 +139,11 @@ fn handle_command(state: &mut DisplayState, cmd: &str) -> Option<String> {
     } else if let Some(url) = cmd.strip_prefix("url_set:") {
         state.url = url.to_string();
         state.url_buffer = url.to_string();
+        if state.dotted {
+            state.page_text.clear();
+            state.page_links.clear();
+            state.loading = true;
+        }
     } else if cmd == "mode:normal" {
         state.mode = Mode::Normal;
     } else if cmd == "mode:url" {
@@ -258,6 +284,84 @@ fn handle_command(state: &mut DisplayState, cmd: &str) -> Option<String> {
         state.loading = val == "true";
     } else if let Some(val) = cmd.strip_prefix("status:") {
         state.status = val.to_string();
+    } else if let Some(val) = cmd.strip_prefix("evaluate_result:") {
+        // Parse JSON result from evaluate command
+        if let Ok(data) = serde_json::from_str::<serde_json::Value>(val) {
+            if let Some(text) = data.get("text").and_then(|v| v.as_str()) {
+                state.page_text = text.to_string();
+            }
+            if let Some(links) = data.get("links").and_then(|v| v.as_array()) {
+                state.page_links.clear();
+                for link in links {
+                    if let (Some(t), Some(h)) = (link.get("text").and_then(|v| v.as_str()), link.get("href").and_then(|v| v.as_str())) {
+                        state.page_links.push((t.to_string(), h.to_string()));
+                    }
+                }
+            }
+            state.loading = false;
+            state.status = format!("{} links", state.page_links.len());
+        }
+    } else if let Some(val) = cmd.strip_prefix("ws:") {
+        // Intercept outgoing WS messages for dotted mode
+        if state.dotted {
+            if let Some(msg) = Message::from_json(val) {
+                match msg.msg_type.as_str() {
+                    types::TYPE | types::KEY_PRESS => {
+                        let text = msg.payload.get("text").or_else(|| msg.payload.get("key")).and_then(|v| v.as_str()).unwrap_or("");
+                        // Check if it's a digit for link clicking
+                        if let Ok(n) = text.parse::<usize>() {
+                            if n > 0 && n <= 9 && !state.page_links.is_empty() {
+                                return handle_dotted_link_click(state, n);
+                            }
+                        }
+                        // Arrow/scroll keys for text scrolling
+                        match text {
+                            "ArrowUp" | "Up" => {
+                                state.scroll_offset = state.scroll_offset.saturating_sub(1);
+                                return None;
+                            }
+                            "ArrowDown" | "Down" => {
+                                let max = state.page_text.lines().count().saturating_sub(5);
+                                state.scroll_offset = (state.scroll_offset + 1).min(max);
+                                return None;
+                            }
+                            "PageUp" => {
+                                state.scroll_offset = state.scroll_offset.saturating_sub(state.rows as usize).saturating_sub(3);
+                                return None;
+                            }
+                            "PageDown" => {
+                                let max = state.page_text.lines().count().saturating_sub(5);
+                                state.scroll_offset = (state.scroll_offset + state.rows as usize).min(max);
+                                return None;
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Pass through to WebSocket
+        return Some(val.to_string());
+    } else if let Some(val) = cmd.strip_prefix("dotted_scroll:") {
+        let delta: i32 = val.parse().unwrap_or(0);
+        let max_scroll = state.page_text.lines().count().saturating_sub(1);
+        let new_offset = (state.scroll_offset as i32 + delta).max(0) as usize;
+        state.scroll_offset = new_offset.min(max_scroll);
+    } else if let Some(val) = cmd.strip_prefix("dotted_click:") {
+        let idx: usize = val.parse().unwrap_or(0);
+        if idx > 0 && idx <= state.page_links.len() {
+            let (_, href) = state.page_links[idx - 1].clone();
+            state.url = href.clone();
+            state.loading = true;
+            state.page_text.clear();
+            state.page_links.clear();
+            let msg = Message::new(types::NAVIGATE, to_payload(&protocol::NavigatePayload {
+                url: href,
+                tab_id: None,
+            }));
+            return Some(msg.to_json());
+        }
     } else if let Some(val) = cmd.strip_prefix("error_msg:") {
         state.push_error(val);
         state.status = format!("⚠ {}", val);
@@ -345,6 +449,22 @@ async fn websocket_task(
     }
 }
 
+fn handle_dotted_link_click(state: &mut DisplayState, n: usize) -> Option<String> {
+    if n > 0 && n <= state.page_links.len() {
+        let (_, href) = state.page_links[n - 1].clone();
+        state.url = href.clone();
+        state.loading = true;
+        state.page_text.clear();
+        state.page_links.clear();
+        let msg = Message::new(types::NAVIGATE, to_payload(&protocol::NavigatePayload {
+            url: href,
+            tab_id: None,
+        }));
+        return Some(msg.to_json());
+    }
+    None
+}
+
 fn handle_server_message(text: &str, frame_tx: &mpsc::Sender<Vec<u8>>, cmd_tx: &mpsc::Sender<String>) {
     let Some(msg) = Message::from_json(text) else {
         return;
@@ -415,6 +535,11 @@ fn handle_server_message(text: &str, frame_tx: &mpsc::Sender<Vec<u8>>, cmd_tx: &
         types::ERROR => {
             if let Some(err) = msg.payload.get("message").and_then(|v| v.as_str()) {
                 let _ = cmd_tx.try_send(format!("error_msg:{err}"));
+            }
+        }
+        types::EVALUATE_RESULT => {
+            if let Some(result) = msg.payload.get("result") {
+                let _ = cmd_tx.try_send(format!("evaluate_result:{}", result));
             }
         }
         _ => {}
