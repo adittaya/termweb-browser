@@ -10,7 +10,7 @@ Run `bcli` for an interactive terminal browser with mouse, keyboard, and 30+ FPS
 
 ```bash
 # One-line install (auto: Node.js, Rust, Chrome, all commands)
-curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/refs/heads/main/install.sh | bash
 
 # Start the server and open a URL
 termweb-server --url https://example.com
@@ -96,7 +96,7 @@ bai wait-for       bai run
 ### One-liner (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/refs/heads/main/install.sh | bash
 ```
 
 Auto-installs Node.js, Rust, Chrome, and all commands. Detects your AI agents and installs the browser skill.

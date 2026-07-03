@@ -97,7 +97,7 @@ The Rust `protocol.rs` **must always mirror** `shared/protocol.js`. If you add a
 ### One-liner (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/refs/heads/main/install.sh | bash
 ```
 
 Auto-installs Node.js (via nvm), Rust (via rustup), Chrome, and all commands into `~/.local/bin`.

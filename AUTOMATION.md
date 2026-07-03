@@ -26,7 +26,7 @@ A practical guide to building reliable browser automations with TermWeb's REST A
 ### One-line install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/refs/heads/main/install.sh | bash
 ```
 
 Installs everything: Node.js, Rust, Chrome, the `termweb`/`bcli`/`bai`/`termweb-server` commands, **and automatically detects your AI agents** (opencode, claude, gemini-cli, etc.) to install the browser automation skill into each one.
@@ -714,7 +714,7 @@ If you start the server without `--url`, no session exists until a WS client con
 ### One-liner install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/refs/heads/main/install.sh | bash
 ```
 
 | Variable | Default | Description |
