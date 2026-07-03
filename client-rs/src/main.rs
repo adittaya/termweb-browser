@@ -70,7 +70,7 @@ const PAGE_EXTRACT_JS: &str = r#"(function(){
         \x20 bcli status                 Session status"
 )]
 struct Args {
-    #[arg(short = 'c', long = "connect", default_value = "ws://127.0.0.1:9222/browser")]
+    #[arg(short = 'c', long = "connect", default_value = "ws://127.0.0.1:9222/browser", global = true)]
     connect: String,
 
     #[arg(
@@ -183,13 +183,6 @@ async fn main() -> Result<()> {
 
     let dotted = !args.graphical;
 
-    if dotted {
-        let req = Message::new(types::EVALUATE, serde_json::json!({
-            "code": PAGE_EXTRACT_JS
-        }));
-        let _ = ws_tx.try_send(req.to_json());
-    }
-
     let running = Arc::new(AtomicBool::new(true));
 
     let (cols, rows) = {
@@ -197,7 +190,6 @@ async fn main() -> Result<()> {
         (size.width, size.height)
     };
     let mut state = DisplayState::new(cols, rows, dotted);
-    state.connected = true;
 
     let ws_url = args.connect.clone();
     let ws_run = running.clone();
@@ -557,7 +549,11 @@ fn handle_command(state: &mut DisplayState, cmd: &str) -> Option<String> {
             state.page_elements.clear();
             state.focus_idx = None;
             state.loading = true;
+            let msg = Message::new(types::EVALUATE, serde_json::json!({"code": PAGE_EXTRACT_JS}));
+            return Some(msg.to_json());
         }
+    } else if let Some(val) = cmd.strip_prefix("connected:") {
+        state.connected = val == "true";
     } else if cmd == "mode:normal" {
         state.mode = Mode::Normal;
     } else if cmd == "mode:browser" {
@@ -1000,6 +996,7 @@ fn handle_server_message(text: &str, frame_tx: &mpsc::Sender<Vec<u8>>, cmd_tx: &
             }
         }
         types::SESSION_INFO => {
+            let _ = cmd_tx.try_send("connected:true".to_string());
             if let Some(url) = msg.payload.get("url").and_then(|v| v.as_str()) {
                 let _ = cmd_tx.try_send(format!("url_set:{url}"));
             }
