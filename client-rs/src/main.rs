@@ -23,23 +23,148 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use display::{DisplayState, Mode, TabInfo};
+use display::{DisplayState, Mode, TabInfo, PageElement, BROWSER_MENU};
 use protocol::{to_payload, Message, types};
 
+/// JavaScript to extract page text, links, and interactive elements with selectors
+const PAGE_EXTRACT_JS: &str = r#"(function(){
+  function qs(el){if(el.id)return '#'+CSS.escape(el.id);var p=[],c=el;
+    while(c&&c!==document.body&&c!==document.documentElement){
+      var t=c.tagName.toLowerCase();if(c.id){p.unshift('#'+CSS.escape(c.id));break}
+      var pa=c.parentElement;if(pa){var sib=Array.from(pa.children).filter(function(x){return x.tagName===c.tagName});var idx=sib.indexOf(c)+1;t+=':nth-of-type('+idx+')'}
+      p.unshift(t);c=pa}return p.join(' > ')}
+  var els=document.querySelectorAll('a[href],button,input,textarea,select,[role="button"],[onclick],[tabindex]:not([tabindex="-1"]),[contenteditable]');
+  var seen=new Set();var elems=Array.from(els).filter(function(e){
+    var r=e.getBoundingClientRect();return r.w>0&&r.h>0&&!seen.has(e)&&(seen.add(e),true)
+  }).map(function(e,i){var r=e.getBoundingClientRect();return{
+    id:i,tag:e.tagName.toLowerCase(),type:e.type||null,
+    text:(e.textContent||'').trim().replace(/\s+/g,' ').slice(0,80),
+    href:e.href||null,role:e.getAttribute('role'),selector:qs(e),
+    rect:{x:r.x,y:r.y,w:r.width,h:r.height},
+    input_type:(e.tagName==='INPUT'||e.tagName==='TEXTAREA')?(e.type||'text'):null
+  }});
+  return JSON.stringify({
+    text:document.body.innerText.replace(/\s+/g,' ').trim().slice(0,50000),
+    links:Array.from(document.querySelectorAll('a[href]')).map(function(a){return{text:(a.textContent||'').trim().slice(0,80),href:a.href}}).filter(function(l){return l.text&&l.href}),
+    elements:elems
+  });
+})()"#;
+
 #[derive(Parser, Debug)]
-#[command(name = "termweb-client", about = "Terminal Browser Viewer (Rust)")]
+#[command(
+    name = "bcli",
+    about = "Terminal Browser — interactive TUI or direct CLI commands",
+    long_about = "BCLI: Terminal browser with headless Chrome.\n\
+        \x20 • Interactive mode (default): full TUI with mouse/keyboard\n\
+        \x20 • Command mode: run one-off commands for automation/scripts\n\
+        \nExamples:\n\
+        \x20 bcli                        Interactive TUI (text mode)\n\
+        \x20 bcli --graphical            Interactive TUI (graphical mode)\n\
+        \x20 bcli nav https://x.com      Navigate to URL\n\
+        \x20 bcli text                   Get page text\n\
+        \x20 bcli links                  Get all links\n\
+        \x20 bcli click '#btn'           Click element\n\
+        \x20 bcli eval 'document.title'  Run JavaScript\n\
+        \x20 bcli screenshot page.jpg    Take screenshot\n\
+        \x20 bcli status                 Session status"
+)]
 struct Args {
     #[arg(short = 'c', long = "connect", default_value = "ws://127.0.0.1:9222/browser")]
     connect: String,
 
-    #[arg(short = 'd', long = "dotted", help = "Text-only mode: render page as text with numbered links (no graphics)")]
-    dotted: bool,
+    #[arg(
+        long = "graphical",
+        help = "Interactive mode: render page screenshots (requires Kitty/Sixel)"
+    )]
+    graphical: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Navigate to a URL
+    Nav {
+        /// URL to navigate to (e.g. https://example.com)
+        url: String,
+    },
+    /// Click element by CSS selector or pixel coordinates
+    Click {
+        /// CSS selector (e.g. '#btn', 'a[href*="login"]')
+        selector: Option<String>,
+        /// X pixel coordinate (used with --y, ignored if --selector given)
+        #[arg(short = 'x')]
+        x: Option<u32>,
+        /// Y pixel coordinate
+        #[arg(short = 'y')]
+        y: Option<u32>,
+    },
+    /// Type text into an element (optionally by selector)
+    Type {
+        /// CSS selector (types into focused element if omitted)
+        selector: Option<String>,
+        /// Text to type
+        text: String,
+    },
+    /// Scroll the page
+    Scroll {
+        /// Pixels to scroll (negative=up, positive=down)
+        #[arg(short = 'y', default_value = "300")]
+        delta_y: i32,
+    },
+    /// Execute JavaScript in the page and print result
+    Eval {
+        /// JavaScript code to execute
+        code: String,
+    },
+    /// Save a screenshot to file
+    Screenshot {
+        /// Output file path (default: screenshot-{timestamp}.jpg)
+        path: Option<String>,
+    },
+    /// Extract clean page text
+    Text,
+    /// Extract all links with hrefs
+    Links,
+    /// Extract interactive elements with CSS selectors
+    Elements,
+    /// Show session and page status
+    Status,
+    /// Go back in history
+    Back,
+    /// Go forward in history
+    Forward,
+    /// Wait for N milliseconds
+    Wait {
+        /// Milliseconds to wait
+        #[arg(default_value = "2000")]
+        ms: u64,
+    },
+    /// Find text in page
+    Find {
+        /// Text to search for
+        text: String,
+    },
+    /// Manage browser session (create, destroy, status)
+    Session {
+        /// Action: create, destroy, status
+        action: String,
+    },
+    #[command(external_subcommand)]
+    Raw(Vec<String>),
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    // ─── Command mode (non-interactive) ─────────────────────────────────
+    if let Some(cmd) = &args.command {
+        return run_command(&args.connect, cmd).await;
+    }
+
+    // ─── Interactive TUI mode ───────────────────────────────────────────
     let mut stdout = std::io::stdout();
     enable_raw_mode()?;
     stdout.execute(EnterAlternateScreen)?;
@@ -57,10 +182,11 @@ async fn main() -> Result<()> {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<String>(256);
     let (ws_tx, ws_rx) = mpsc::channel::<String>(64);
 
-    // In dotted mode, immediately request page text
-    if args.dotted {
+    let dotted = !args.graphical;
+
+    if dotted {
         let req = Message::new(types::EVALUATE, serde_json::json!({
-            "code": "JSON.stringify({text: document.body.innerText.slice(0,50000), links: Array.from(document.querySelectorAll('a[href]')).map(a => ({text: a.textContent.trim().slice(0,80), href: a.href})).filter(l => l.text && l.href)})"
+            "code": PAGE_EXTRACT_JS
         }));
         let _ = ws_tx.try_send(req.to_json());
     }
@@ -71,7 +197,7 @@ async fn main() -> Result<()> {
         let size = terminal.size()?;
         (size.width, size.height)
     };
-    let mut state = DisplayState::new(cols, rows, args.dotted);
+    let mut state = DisplayState::new(cols, rows, dotted);
     state.connected = true;
 
     let ws_url = args.connect.clone();
@@ -94,7 +220,6 @@ async fn main() -> Result<()> {
 
         while let Ok(bytes) = frame_rx.try_recv() {
             if state.dotted {
-                // In dotted mode, skip image rendering, text fetched on navigate
             } else if let Err(e) = state.set_image_from_jpeg(&bytes) {
                 log::warn!("Image decode error: {e}");
             }
@@ -108,10 +233,9 @@ async fn main() -> Result<()> {
             }
         }
 
-        // In dotted mode, request page text on every frame (navigation completed)
         if state.dotted && state.page_text.is_empty() {
             let req = Message::new(types::EVALUATE, serde_json::json!({
-                "code": "JSON.stringify({text: document.body.innerText.slice(0,50000), links: Array.from(document.querySelectorAll('a[href]')).map(a => ({text: a.textContent.trim().slice(0,80), href: a.href})).filter(l => l.text && l.href)})"
+                "code": PAGE_EXTRACT_JS
             }));
             let _ = ws_tx.try_send(req.to_json()).ok();
         }
@@ -131,6 +255,299 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+// ─── Command mode runner ─────────────────────────────────────────────────
+
+async fn run_command(ws_url: &str, cmd: &Command) -> Result<()> {
+    let (ws_stream, _) = tokio::time::timeout(
+        Duration::from_secs(10),
+        connect_async(ws_url),
+    ).await
+        .map_err(|_| anyhow::anyhow!("Connection timed out (10s)"))?
+        .map_err(|e| anyhow::anyhow!("Connection failed: {e}"))?;
+
+    let (mut write, mut read) = ws_stream.split();
+
+    match cmd {
+        Command::Nav { url } => {
+            let msg = Message::new(types::NAVIGATE, serde_json::json!({"url": url}));
+            write.send(WsMessage::Text(msg.to_json().into())).await?;
+            println!("Navigating to: {url}");
+        }
+
+        Command::Click { selector, x, y } => {
+            let msg = if let Some(sel) = selector {
+                Message::new(types::CLICK, serde_json::json!({"selector": sel, "x": 0, "y": 0}))
+            } else {
+                let cx = x.unwrap_or(0);
+                let cy = y.unwrap_or(0);
+                Message::new(types::CLICK, serde_json::json!({"x": cx, "y": cy, "button": "left"}))
+            };
+            write.send(WsMessage::Text(msg.to_json().into())).await?;
+            let loc = selector.as_deref().unwrap_or(&format!("({}, {})", x.unwrap_or(0), y.unwrap_or(0)));
+            println!("Clicked: {loc}");
+        }
+
+        Command::Type { selector, text } => {
+            if let Some(sel) = selector {
+                let click = Message::new(types::CLICK, serde_json::json!({"selector": sel, "x": 0, "y": 0}));
+                write.send(WsMessage::Text(click.to_json().into())).await?;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let msg = Message::new(types::TYPE, serde_json::json!({"text": text}));
+            write.send(WsMessage::Text(msg.to_json().into())).await?;
+            println!("Typed {} chars: {}", text.len(), text.chars().take(60).collect::<String>());
+        }
+
+        Command::Scroll { delta_y } => {
+            let msg = Message::new(types::SCROLL, serde_json::json!({"delta_y": delta_y}));
+            write.send(WsMessage::Text(msg.to_json().into())).await?;
+            println!("Scrolled: {delta_y}px");
+        }
+
+        Command::Back => {
+            let msg = Message::new(types::GO_BACK, serde_json::Value::Null);
+            write.send(WsMessage::Text(msg.to_json().into())).await?;
+            println!("Going back");
+        }
+
+        Command::Forward => {
+            let msg = Message::new(types::GO_FORWARD, serde_json::Value::Null);
+            write.send(WsMessage::Text(msg.to_json().into())).await?;
+            println!("Going forward");
+        }
+
+        Command::Wait { ms } => {
+            tokio::time::sleep(Duration::from_millis(*ms)).await;
+            println!("Waited {ms}ms");
+        }
+
+        Command::Find { text } => {
+            let msg = Message::new(types::FIND_IN_PAGE, serde_json::json!({"text": text}));
+            write.send(WsMessage::Text(msg.to_json().into())).await?;
+            println!("Searching for: {text}");
+        }
+
+        // ─── Query commands (wait for response) ────────────────────────
+
+        Command::Eval { code } => {
+            let msg = Message::new(types::EVALUATE, serde_json::json!({"code": code}));
+            write.send(WsMessage::Text(msg.to_json().into())).await?;
+            let result = wait_for_response(&mut read, &[types::EVALUATE_RESULT], Duration::from_secs(15)).await;
+            match result {
+                Some(json) => {
+                    if let Some(r) = json.get("result") {
+                        println!("{}", serde_json::to_string_pretty(r).unwrap_or_else(|_| r.to_string()));
+                    }
+                }
+                None => eprintln!("No response (timeout)"),
+            }
+        }
+
+        Command::Text => {
+            let msg = Message::new(types::EVALUATE, serde_json::json!({
+                "code": "document.body.innerText.replace(/\\s+/g,' ').trim().slice(0,100000)"
+            }));
+            write.send(WsMessage::Text(msg.to_json().into())).await?;
+            let result = wait_for_response(&mut read, &[types::EVALUATE_RESULT], Duration::from_secs(15)).await;
+            match result {
+                Some(json) => {
+                    if let Some(r) = json.get("result").and_then(|v| v.as_str()) {
+                        println!("{r}");
+                    } else {
+                        println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
+                    }
+                }
+                None => eprintln!("No response (timeout)"),
+            }
+        }
+
+        Command::Links => {
+            let msg = Message::new(types::EVALUATE, serde_json::json!({
+                "code": "JSON.stringify(Array.from(document.querySelectorAll('a[href]')).map(a=>({text:(a.textContent||'').trim().slice(0,100),href:a.href})).filter(l=>l.text&&l.href))"
+            }));
+            write.send(WsMessage::Text(msg.to_json().into())).await?;
+            let result = wait_for_response(&mut read, &[types::EVALUATE_RESULT], Duration::from_secs(15)).await;
+            match result {
+                Some(json) => {
+                    if let Some(links) = json.get("result").and_then(|v| v.as_str()).and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(s).ok()) {
+                        for (i, link) in links.iter().enumerate() {
+                            let text = link.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            let href = link.get("href").and_then(|v| v.as_str()).unwrap_or("");
+                            println!("{:>4}. {} → {}", i + 1, text, href);
+                        }
+                        println!("── {} links total ──", links.len());
+                    }
+                }
+                None => eprintln!("No response (timeout)"),
+            }
+        }
+
+        Command::Elements => {
+            let msg = Message::new(types::EVALUATE, serde_json::json!({"code": PAGE_EXTRACT_JS}));
+            write.send(WsMessage::Text(msg.to_json().into())).await?;
+            let result = wait_for_response(&mut read, &[types::EVALUATE_RESULT], Duration::from_secs(15)).await;
+            match result {
+                Some(json) => {
+                    if let Some(elements) = json.get("elements").and_then(|v| v.as_array()) {
+                        for (i, el) in elements.iter().enumerate() {
+                            let tag = el.get("tag").and_then(|v| v.as_str()).unwrap_or("?");
+                            let text = el.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            let sel = el.get("selector").and_then(|v| v.as_str()).unwrap_or("");
+                            let it = el.get("input_type").and_then(|v| v.as_str()).unwrap_or("");
+                            if !text.is_empty() || !sel.is_empty() {
+                                println!("{:>4}. <{}> {} | sel={} {}", i + 1, tag, text, sel,
+                                    if !it.is_empty() { format!("type={}", it) } else { String::new() });
+                            }
+                        }
+                        if let Some(count) = json.get("elements").and_then(|v| v.as_array()).map(|a| a.len()) {
+                            println!("── {count} elements total ──");
+                        }
+                    } else {
+                        println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
+                    }
+                }
+                None => eprintln!("No response (timeout)"),
+            }
+        }
+
+        Command::Screenshot { path } => {
+            let msg = Message::new(types::REQUEST_SCREENSHOT, serde_json::Value::Null);
+            write.send(WsMessage::Text(msg.to_json().into())).await?;
+            let result = wait_for_response(&mut read, &[types::FRAME], Duration::from_secs(15)).await;
+            match result {
+                Some(json) => {
+                    if let Some(data) = json.get("data").and_then(|v| v.as_str()) {
+                        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) {
+                            let filename = path.clone().unwrap_or_else(|| {
+                                let ts = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default().as_secs();
+                                format!("screenshot-{ts}.jpg")
+                            });
+                            std::fs::write(&filename, &bytes)?;
+                            let w = json.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let h = json.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+                            println!("Screenshot saved: {filename} ({w}x{h}, {} bytes)", bytes.len());
+                        }
+                    }
+                }
+                None => eprintln!("No screenshot received (timeout)"),
+            }
+        }
+
+        Command::Status => {
+            let result = wait_for_response(&mut read, &[types::SESSION_INFO, types::URL_CHANGED], Duration::from_secs(5)).await;
+            match result {
+                Some(json) => {
+                    let url = json.get("url").and_then(|v| v.as_str()).unwrap_or("?");
+                    let title = json.get("title").and_then(|v| v.as_str()).unwrap_or("?");
+                    let sid = json.get("sessionId").and_then(|v| v.as_str()).unwrap_or("?");
+                    let vp_w = json.get("viewport").and_then(|v| v.get("width")).and_then(|v| v.as_u64()).unwrap_or(0);
+                    let vp_h = json.get("viewport").and_then(|v| v.get("height")).and_then(|v| v.as_u64()).unwrap_or(0);
+                    let tabs = json.get("tabs").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+                    println!("Session:     {sid}");
+                    println!("URL:         {url}");
+                    println!("Title:       {title}");
+                    println!("Viewport:    {vp_w}x{vp_h}");
+                    println!("Tabs open:   {tabs}");
+                    println!("Connected:   ws://…");
+                }
+                None => {
+                    println!("Session:     active");
+                    println!("Connected:   {ws_url}");
+                }
+            }
+        }
+
+        Command::Session { action } => {
+            match action.as_str() {
+                "status" | "info" => {
+                    let result = wait_for_response(&mut read, &[types::SESSION_INFO], Duration::from_secs(5)).await;
+                    match result {
+                        Some(json) => {
+                            let sid = json.get("sessionId").and_then(|v| v.as_str()).unwrap_or("?");
+                            let url = json.get("url").and_then(|v| v.as_str()).unwrap_or("?");
+                            let tabs = json.get("tabs").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+                            println!("Session: {sid} | URL: {url} | Tabs: {tabs}");
+                        }
+                        None => println!("Session active but no info received yet"),
+                    }
+                }
+                "create" | "new" => {
+                    // Session is auto-created on WS connect
+                    let result = wait_for_response(&mut read, &[types::SESSION_INFO], Duration::from_secs(5)).await;
+                    match result {
+                        Some(json) => {
+                            let sid = json.get("sessionId").and_then(|v| v.as_str()).unwrap_or("?");
+                            println!("Session created: {sid}");
+                        }
+                        None => println!("Session created (no info)"),
+                    }
+                }
+                "destroy" | "close" | "kill" => {
+                    // Close WS connection — server will cleanup idle session
+                    println!("Session will close (idle cleanup in 30s)");
+                }
+                _ => {
+                    eprintln!("Unknown session action: {action}. Use: status, create, destroy");
+                }
+            }
+        }
+
+        Command::Raw(args) => {
+            eprintln!("Unknown command: {}", args.join(" "));
+            eprintln!("Run 'bcli --help' for available commands");
+            return Err(anyhow::anyhow!("Unknown command"));
+        }
+    }
+
+    // Brief wait for server to process, then disconnect
+    write.send(WsMessage::Close(None)).await.ok();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    Ok(())
+}
+
+/// Wait for a server message matching one of the expected types
+async fn wait_for_response(
+    read: &mut (impl futures_util::Stream<Item = Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
+    expected_types: &[&str],
+    timeout: Duration,
+) -> Option<serde_json::Value> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        tokio::select! {
+            msg = read.next() => {
+                match msg {
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
+                        if let Some(msg) = Message::from_json(&text) {
+                            if expected_types.contains(&msg.msg_type.as_str()) {
+                                return Some(msg.payload);
+                            }
+                            // Also capture URL_CHANGED after NAVIGATE
+                            if expected_types.contains(&types::URL_CHANGED) && msg.msg_type == types::URL_CHANGED {
+                                return Some(msg.payload);
+                            }
+                            // Capture SESSION_INFO
+                            if expected_types.contains(&types::SESSION_INFO) && msg.msg_type == types::SESSION_INFO {
+                                return Some(msg.payload);
+                            }
+                        }
+                    }
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | None => {
+                        return None;
+                    }
+                    _ => {}
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+    }
+}
+
 fn handle_command(state: &mut DisplayState, cmd: &str) -> Option<String> {
     if let Some(url) = cmd.strip_prefix("url_navigate:") {
         state.url = url.to_string();
@@ -142,10 +559,14 @@ fn handle_command(state: &mut DisplayState, cmd: &str) -> Option<String> {
         if state.dotted {
             state.page_text.clear();
             state.page_links.clear();
+            state.page_elements.clear();
+            state.focus_idx = None;
             state.loading = true;
         }
     } else if cmd == "mode:normal" {
         state.mode = Mode::Normal;
+    } else if cmd == "mode:browser" {
+        state.mode = Mode::Browser { menu_idx: 0 };
     } else if cmd == "mode:url" {
         state.url_buffer = state.url.clone();
         state.mode = Mode::UrlInput { cursor: state.url.len() };
@@ -298,8 +719,31 @@ fn handle_command(state: &mut DisplayState, cmd: &str) -> Option<String> {
                     }
                 }
             }
+            // Parse interactive elements
+            if let Some(elements) = data.get("elements").and_then(|v| v.as_array()) {
+                state.page_elements = elements.iter()
+                    .filter_map(|e| serde_json::from_value::<PageElement>(e.clone()).ok())
+                    .collect();
+                // Sort by vertical position (top-to-bottom) then horizontal (left-to-right)
+                state.page_elements.sort_by(|a, b| {
+                    a.center_y().partial_cmp(&b.center_y())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.center_x().partial_cmp(&b.center_x())
+                            .unwrap_or(std::cmp::Ordering::Equal))
+                });
+                // Re-assign IDs after sort
+                for (i, el) in state.page_elements.iter_mut().enumerate() {
+                    el.id = i;
+                }
+                // Auto-focus first element if none focused
+                if state.focus_idx.is_none() && !state.page_elements.is_empty() {
+                    state.focus_idx = Some(0);
+                }
+            }
             state.loading = false;
-            state.status = format!("{} links", state.page_links.len());
+            let el_count = state.page_elements.len();
+            let link_count = state.page_links.len();
+            state.status = format!("{} elements, {} links", el_count, link_count);
         }
     } else if let Some(val) = cmd.strip_prefix("ws:") {
         // Intercept outgoing WS messages for dotted mode
@@ -310,31 +754,95 @@ fn handle_command(state: &mut DisplayState, cmd: &str) -> Option<String> {
                         let text = msg.payload.get("text").or_else(|| msg.payload.get("key")).and_then(|v| v.as_str()).unwrap_or("");
                         // Check if it's a digit for link clicking
                         if let Ok(n) = text.parse::<usize>() {
-                            if n > 0 && n <= 9 && !state.page_links.is_empty() {
+                            if n > 0 && n <= 9 && !state.page_links.is_empty() && state.focus_idx.is_none() {
                                 return handle_dotted_link_click(state, n);
                             }
                         }
-                        // Arrow/scroll keys for text scrolling
-                        match text {
-                            "ArrowUp" | "Up" => {
-                                state.scroll_offset = state.scroll_offset.saturating_sub(1);
-                                return None;
+                        // Element navigation in Normal mode with elements loaded
+                        if !state.page_elements.is_empty() && matches!(state.mode, Mode::Normal) {
+                            match text {
+                                "Tab" | "ArrowDown" | "Down" => {
+                                    let next = state.focus_idx.map(|i| i + 1).unwrap_or(0);
+                                    if next < state.page_elements.len() {
+                                        state.focus_idx = Some(next);
+                                    } else {
+                                        state.focus_idx = Some(0); // wrap
+                                    }
+                                    state.scroll_offset = 0;
+                                    return None;
+                                }
+                                "BackTab" | "ArrowUp" | "Up" => {
+                                    let prev = state.focus_idx.map(|i| i.wrapping_sub(1)).unwrap_or(0);
+                                    state.focus_idx = Some(if prev >= state.page_elements.len() { state.page_elements.len() - 1 } else { prev });
+                                    state.scroll_offset = 0;
+                                    return None;
+                                }
+                                "ArrowRight" | "Right" => {
+                                    if let Some(idx) = state.focus_idx {
+                                        let cur_y = state.page_elements[idx].center_y();
+                                        // Find next element on similar Y
+                                        let next = (idx + 1..state.page_elements.len())
+                                            .find(|&i| (state.page_elements[i].center_y() - cur_y).abs() < 30.0)
+                                            .unwrap_or(idx);
+                                        state.focus_idx = Some(next);
+                                    }
+                                    return None;
+                                }
+                                "ArrowLeft" | "Left" => {
+                                    if let Some(idx) = state.focus_idx {
+                                        let cur_y = state.page_elements[idx].center_y();
+                                        let prev = (0..idx).rev()
+                                            .find(|&i| (state.page_elements[i].center_y() - cur_y).abs() < 30.0)
+                                            .unwrap_or(idx);
+                                        state.focus_idx = Some(prev);
+                                    }
+                                    return None;
+                                }
+                                "Enter" => {
+                                    if let Some(idx) = state.focus_idx {
+                                        if let Some(el) = state.page_elements.get(idx) {
+                                            // Input/text areas → enter typing mode
+                                            if el.input_type.is_some() {
+                                                state.mode = Mode::ElementInput { element_id: idx };
+                                                state.status = format!("Typing into {}… press Esc when done", el.tag);
+                                                return None;
+                                            }
+                                            // Otherwise click the element
+                                            return handle_element_click(state, el);
+                                        }
+                                    }
+                                }
+                                "Escape" => {
+                                    state.focus_idx = None;
+                                    return None;
+                                }
+                                _ => {}
                             }
-                            "ArrowDown" | "Down" => {
-                                let max = state.page_text.lines().count().saturating_sub(5);
-                                state.scroll_offset = (state.scroll_offset + 1).min(max);
-                                return None;
+                        }
+
+                        // Arrow/scroll keys for text scrolling (when no elements or elements but no focus)
+                        if state.page_elements.is_empty() || state.focus_idx.is_none() {
+                            match text {
+                                "ArrowUp" | "Up" => {
+                                    state.scroll_offset = state.scroll_offset.saturating_sub(1);
+                                    return None;
+                                }
+                                "ArrowDown" | "Down" => {
+                                    let max = state.page_text.lines().count().saturating_sub(5);
+                                    state.scroll_offset = (state.scroll_offset + 1).min(max);
+                                    return None;
+                                }
+                                "PageUp" => {
+                                    state.scroll_offset = state.scroll_offset.saturating_sub(state.rows as usize).saturating_sub(3);
+                                    return None;
+                                }
+                                "PageDown" => {
+                                    let max = state.page_text.lines().count().saturating_sub(5);
+                                    state.scroll_offset = (state.scroll_offset + state.rows as usize).min(max);
+                                    return None;
+                                }
+                                _ => {}
                             }
-                            "PageUp" => {
-                                state.scroll_offset = state.scroll_offset.saturating_sub(state.rows as usize).saturating_sub(3);
-                                return None;
-                            }
-                            "PageDown" => {
-                                let max = state.page_text.lines().count().saturating_sub(5);
-                                state.scroll_offset = (state.scroll_offset + state.rows as usize).min(max);
-                                return None;
-                            }
-                            _ => {}
                         }
                     }
                     _ => {}
@@ -447,6 +955,21 @@ async fn websocket_task(
             reconnect_delay = (reconnect_delay * 2).min(Duration::from_secs(30));
         }
     }
+}
+
+fn handle_element_click(state: &mut DisplayState, el: &PageElement) -> Option<String> {
+    // Click element by selector (preferred) or by center coordinates
+    if let Some(selector) = &el.selector {
+        state.status = format!("Clicking {}: {}", el.tag, el.text);
+        let msg = Message::new(types::CLICK, serde_json::json!({
+            "selector": selector,
+            "x": el.rect.x + el.rect.w / 2.0,
+            "y": el.rect.y + el.rect.h / 2.0,
+            "tab_id": null
+        }));
+        return Some(msg.to_json());
+    }
+    None
 }
 
 fn handle_dotted_link_click(state: &mut DisplayState, n: usize) -> Option<String> {
@@ -569,7 +1092,6 @@ async fn input_task(tx: mpsc::Sender<String>, running: Arc<AtomicBool>) {
 
                             match mode {
                                 Mode::UrlInput { .. } => {
-                                    // URL input keys are forwarded as url_key commands
                                     let cmd = url_key_cmd(&k);
                                     let _ = tx.send(cmd).await;
                                     if k.key == "Enter" || k.key == "Escape" {
@@ -582,6 +1104,12 @@ async fn input_task(tx: mpsc::Sender<String>, running: Arc<AtomicBool>) {
                                 }
                                 Mode::Normal => {
                                     handle_normal_input(k, &mut mode, &tx).await;
+                                }
+                                Mode::ElementInput { element_id } => {
+                                    handle_element_input(&k, element_id, &mut mode, &tx).await;
+                                }
+                                Mode::Browser { .. } => {
+                                    handle_browser_input(&k, &mut mode, &tx).await;
                                 }
                             }
                         }
@@ -653,6 +1181,12 @@ async fn handle_normal_input(
 ) {
     if k.ctrl {
         match k.key.as_str() {
+            "0" => {
+                // Toggle to browser mode
+                *mode = Mode::Browser { menu_idx: 0 };
+                let _ = tx.send("mode:browser".to_string()).await;
+                return;
+            }
             "l" => {
                 *mode = Mode::UrlInput { cursor: 0 };
                 let _ = tx.send("mode:url".to_string()).await;
@@ -738,6 +1272,137 @@ async fn handle_normal_input(
     };
 
     let _ = tx.send(format!("ws:{}", msg.to_json())).await;
+}
+
+async fn handle_element_input(
+    k: &input::KeyInput,
+    element_id: usize,
+    mode: &mut Mode,
+    tx: &mpsc::Sender<String>,
+) {
+    match k.key.as_str() {
+        "Escape" => {
+            *mode = Mode::Normal;
+            let _ = tx.send("mode:normal".to_string()).await;
+        }
+        "Enter" => {
+            // Forward Enter as TYPE newline then exit
+            let msg = Message::new(types::TYPE, to_payload(&protocol::TypePayload {
+                text: "\n".to_string(),
+                tab_id: None,
+            }));
+            let _ = tx.send(format!("ws:{}", msg.to_json())).await;
+        }
+        "Backspace" => {
+            let msg = Message::new(types::KEY_PRESS, to_payload(&protocol::KeyPressPayload {
+                key: "Backspace".to_string(),
+                modifiers: None,
+                tab_id: None,
+            }));
+            let _ = tx.send(format!("ws:{}", msg.to_json())).await;
+        }
+        "Tab" => {
+            *mode = Mode::Normal;
+            let _ = tx.send("mode:normal".to_string()).await;
+        }
+        _ => {
+            if k.key.len() == 1 && !k.is_special {
+                let msg = Message::new(types::TYPE, to_payload(&protocol::TypePayload {
+                    text: k.key.clone(),
+                    tab_id: None,
+                }));
+                let _ = tx.send(format!("ws:{}", msg.to_json())).await;
+            }
+        }
+    }
+}
+
+async fn handle_browser_input(
+    k: &input::KeyInput,
+    mode: &mut Mode,
+    tx: &mpsc::Sender<String>,
+) {
+    let menu_idx = match mode {
+        Mode::Browser { menu_idx } => *menu_idx,
+        _ => 0,
+    };
+    let max_idx = BROWSER_MENU.len().saturating_sub(1);
+
+    match k.key.as_str() {
+        "0" if k.ctrl => {
+            // Toggle back to page mode
+            *mode = Mode::Normal;
+            let _ = tx.send("mode:normal".to_string()).await;
+        }
+        "q" if k.ctrl => {
+            // Quit browser mode
+            *mode = Mode::Normal;
+            let _ = tx.send("mode:normal".to_string()).await;
+        }
+        "Escape" => {
+            *mode = Mode::Normal;
+            let _ = tx.send("mode:normal".to_string()).await;
+        }
+        "ArrowDown" | "Down" | "Tab" | "j" => {
+            let next = (menu_idx + 1).min(max_idx);
+            *mode = Mode::Browser { menu_idx: next };
+        }
+        "ArrowUp" | "Up" | "BackTab" | "k" => {
+            let prev = menu_idx.wrapping_sub(1).min(max_idx);
+            *mode = Mode::Browser { menu_idx: prev };
+        }
+        "Enter" | " " => {
+            if let Some(item) = BROWSER_MENU.get(menu_idx) {
+                let action = item.id;
+                match action {
+                    "back" => {
+                        *mode = Mode::Normal;
+                        let _ = tx.send("mode:normal".to_string()).await;
+                    }
+                    "search" => {
+                        *mode = Mode::Normal;
+                        let msg = Message::new(types::NAVIGATE, to_payload(&protocol::NavigatePayload {
+                            url: "chrome://settings/searchEngines".to_string(),
+                            tab_id: None,
+                        }));
+                        let _ = tx.send(format!("ws:{}", msg.to_json())).await;
+                    }
+                    "tabs" => {
+                        // Just show tab info in the info panel (already visible)
+                    }
+                    "settings" => {
+                        *mode = Mode::Normal;
+                        let msg = Message::new(types::NAVIGATE, to_payload(&protocol::NavigatePayload {
+                            url: "chrome://settings".to_string(),
+                            tab_id: None,
+                        }));
+                        let _ = tx.send(format!("ws:{}", msg.to_json())).await;
+                    }
+                    "bookmarks" => {
+                        *mode = Mode::Normal;
+                        let msg = Message::new(types::NAVIGATE, to_payload(&protocol::NavigatePayload {
+                            url: "chrome://bookmarks".to_string(),
+                            tab_id: None,
+                        }));
+                        let _ = tx.send(format!("ws:{}", msg.to_json())).await;
+                    }
+                    "clear" => {
+                        *mode = Mode::Normal;
+                        let msg = Message::new(types::NAVIGATE, to_payload(&protocol::NavigatePayload {
+                            url: "chrome://settings/clearBrowserData".to_string(),
+                            tab_id: None,
+                        }));
+                        let _ = tx.send(format!("ws:{}", msg.to_json())).await;
+                    }
+                    "about" => {
+                        // Stay in browser mode, info shown in panel
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 async fn forward_mouse(input: input::MouseInput, tx: &mpsc::Sender<String>) {

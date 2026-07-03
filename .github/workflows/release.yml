@@ -1,18 +1,72 @@
-name: Release
+name: Build & Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
-  build:
-    name: Build ${{ matrix.platform }}
+  # ─── CI check (every push/PR) ──────────────────────────────────────────
+  ci:
+    name: CI — ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+            dir: linux-x64
+          - os: macos-14
+            rust_target: aarch64-apple-darwin
+            dir: macos-arm64
+          - os: windows-2022
+            rust_target: x86_64-pc-windows-msvc
+            dir: windows-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client-rs
+          key: ${{ matrix.rust_target }}
+
+      - name: Build Rust client
+        run: cargo build --release --target ${{ matrix.rust_target }}
+        working-directory: client-rs
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install npm dependencies
+        run: npm ci --omit=optional
+
+  # ─── Full release build (tag push only) ────────────────────────────────
+  release:
+    name: Release ${{ matrix.dir }}
+    runs-on: ${{ matrix.os }}
+    if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-22.04
@@ -39,15 +93,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ── Rust build ──────────────────────────────────────────────────────
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client-rs
+          key: ${{ matrix.rust_target }}
+
       - name: Build Rust client
         run: cargo build --release --target ${{ matrix.rust_target }}
         working-directory: client-rs
 
+      # ── Server bundle ───────────────────────────────────────────────────
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -56,12 +118,20 @@ jobs:
       - name: Install npm dependencies
         run: npm ci --omit=optional
 
-      - name: Bundle server with pkg
-        run: npx -y @yao-pkg/pkg . --targets ${{ matrix.node_target }} --output dist/${{ matrix.dir }}/termweb-server --compress GZip
+      - name: Try to bundle server with pkg
+        id: bundle
         continue-on-error: true
+        run: |
+          mkdir -p dist/${{ matrix.dir }}
+          npx -y @yao-pkg/pkg . \
+            --targets ${{ matrix.node_target }} \
+            --output dist/${{ matrix.dir }}/termweb-server \
+            --compress GZip
+          echo "status=ok" >> "$GITHUB_OUTPUT"
 
-      - name: Fallback server (if pkg fails)
-        if: steps.bundle.outcome == 'failure'
+      - name: Fallback: copy server source
+        if: steps.bundle.outputs.status != 'ok'
+        shell: bash
         run: |
           mkdir -p dist/${{ matrix.dir }}/server dist/${{ matrix.dir }}/shared dist/${{ matrix.dir }}/config
           cp server/*.js dist/${{ matrix.dir }}/server/
@@ -73,22 +143,27 @@ jobs:
           SEA
           chmod +x dist/${{ matrix.dir }}/termweb-server
 
+      # ── Assemble package ────────────────────────────────────────────────
       - name: Copy assets
         shell: bash
         run: |
           mkdir -p dist/${{ matrix.dir }}
+
           if [[ "${{ matrix.dir }}" == *"windows"* ]]; then
             cp client-rs/target/${{ matrix.rust_target }}/release/bcli.exe dist/${{ matrix.dir }}/bcli.exe
           else
             cp client-rs/target/${{ matrix.rust_target }}/release/bcli dist/${{ matrix.dir }}/bcli
           fi
+
           cp scripts/download-chrome.js dist/${{ matrix.dir }}/
           cp bin/bai dist/${{ matrix.dir }}/bai
           chmod +x dist/${{ matrix.dir }}/bai
           echo "${{ github.ref_name }}" > dist/${{ matrix.dir }}/VERSION
 
+          # Create master launcher
           cat > dist/${{ matrix.dir }}/termweb << 'LAUNCHER'
           #!/usr/bin/env bash
+          set -euo pipefail
           DIR="$(cd "$(dirname "$0")" && pwd)"
           if [ "$1" = "--server" ]; then
             shift
@@ -99,17 +174,58 @@ jobs:
           LAUNCHER
           chmod +x dist/${{ matrix.dir }}/termweb
 
+          # Create README
+          cat > dist/${{ matrix.dir }}/README.txt << 'README'
+          TermWeb Browser ${{ github.ref_name }}
+          ==========================
+          Repo: https://github.com/${{ github.repository }}
+
+          Quick start:
+            ./termweb --server --url https://example.com
+            ./bcli
+
+          AI agent mode:
+            ./bai status
+            ./bai navigate https://example.com
+            ./bai text
+          README
+
       - name: Package archive
         shell: bash
         run: |
           cd dist
           if [[ "${{ matrix.dir }}" == *"windows"* ]]; then
-            7z a termweb-${{ matrix.dir }}.zip ${{ matrix.dir }}/
+            7z a -mx=9 "termweb-${{ matrix.dir }}.zip" "${{ matrix.dir }}/"
           else
-            tar czf termweb-${{ matrix.dir }}.tar.gz ${{ matrix.dir }}/
+            tar czf "termweb-${{ matrix.dir }}.tar.gz" "${{ matrix.dir }}/"
           fi
+          rm -rf "${{ matrix.dir }}/"
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/termweb-*.tar.gz
+          files: dist/termweb-*
+          generate_release_notes: true
+
+  # ─── Build summary ─────────────────────────────────────────────────────
+  summary:
+    name: Release Summary
+    runs-on: ubuntu-22.04
+    needs: release
+    if: always() && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Print release summary
+        run: |
+          echo "## Release ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Artifacts built for all platforms." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Platform | Archive |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|---------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Linux x64 | \`termweb-linux-x64.tar.gz\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Linux ARM64 | \`termweb-linux-arm64.tar.gz\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| macOS x64 | \`termweb-macos-x64.tar.gz\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| macOS ARM64 | \`termweb-macos-arm64.tar.gz\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Windows x64 | \`termweb-windows-x64.zip\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Install: \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/refs/heads/main/scripts/install.sh | bash\`" >> $GITHUB_STEP_SUMMARY

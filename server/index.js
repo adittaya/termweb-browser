@@ -245,8 +245,21 @@ wss.on('connection', async (ws, req) => {
         case 'click': {
           const page = resolveActivePage();
           if (page) {
-            const { x, y } = defaultSession._mapCoord(payload.x, payload.y);
-            await humanClick(page, x, y, payload.button || 'left');
+            if (payload.selector) {
+              // Click by CSS selector (used by dotted/element mode)
+              await page.evaluate((sel) => {
+                const el = document.querySelector(sel);
+                if (!el) throw new Error(`Element not found: ${sel}`);
+                const rect = el.getBoundingClientRect();
+                el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: rect.x + rect.width / 2, clientY: rect.y + rect.height / 2 }));
+                el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: rect.x + rect.width / 2, clientY: rect.y + rect.height / 2 }));
+                el.click();
+              }, payload.selector);
+            } else {
+              // Click by coordinates with human emulation
+              const { x, y } = defaultSession._mapCoord(payload.x, payload.y);
+              await humanClick(page, x, y, payload.button || 'left');
+            }
           }
           break;
         }

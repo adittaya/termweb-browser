@@ -1,36 +1,68 @@
 #!/usr/bin/env bash
+# ─── termweb-browser: Production Installer ─────────────────────────────────
+# Detects OS/arch, downloads prebuilt binary from GitHub Releases,
+# falls back to source build. Zero dependencies beyond curl/wget + bash.
+#
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/main/scripts/install.sh | bash -s v1.0.0
+#
+# Env vars:
+#   INSTALL_DIR    Binary installation directory  (default: ~/.local/bin)
+#   DATA_DIR       Data/cache directory           (default: ~/.termweb)
+#   CHROME_PATH    Pre-existing Chrome binary      (skip auto-download)
+#   TERMWEB_PORT   Server port                    (default: 9222)
+#   NO_BUILD       Skip source build fallback      (any non-empty)
+#   NO_CHROME      Skip Chrome download            (any non-empty)
+#   GITHUB_TOKEN   GitHub API token for rate limit
+# ────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 REPO="adittaya/termweb-browser"
 REPO_URL="https://github.com/${REPO}"
+API_URL="https://api.github.com/repos/${REPO}"
 VERSION="${1:-latest}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 DATA_DIR="${DATA_DIR:-$HOME/.termweb}"
+TEMP_DIR=""
 
-# ─── Colors ───────────────────────────────────────────────────────────────────
+# ─── Cleanup ────────────────────────────────────────────────────────────────
+cleanup() {
+    local ec=$?
+    [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ] && rm -rf "$TEMP_DIR" 2>/dev/null || true
+    exit $ec
+}
+trap cleanup EXIT INT TERM
+
+# ─── Output helpers ─────────────────────────────────────────────────────────
 info()  { printf "\033[1;34m•\033[0m %s\n" "$*"; }
 ok()    { printf "\033[1;32m✓\033[0m %s\n" "$*"; }
 warn()  { printf "\033[1;33m!\033[0m %s\n" "$*" >&2; }
 err()   { printf "\033[1;31m✗\033[0m %s\n" "$*" >&2; exit 1; }
+header(){ printf "\n\033[1;36m═══ %s ═══\033[0m\n" "$*"; }
 
-# ─── Platform detection ───────────────────────────────────────────────────────
+# ─── Platform detection ─────────────────────────────────────────────────────
 detect_os() {
-    case "$(uname -s)" in
+    local os
+    os="$(uname -s)"
+    case "$os" in
         Linux)  echo "linux" ;;
         Darwin) echo "macos" ;;
         CYGWIN*|MINGW*|MSYS*) echo "windows" ;;
-        *)      err "Unsupported OS: $(uname -s)" ;;
+        *)      err "Unsupported OS: ${os}. We support Linux, macOS, and Windows." ;;
     esac
 }
 detect_arch() {
-    case "$(uname -m)" in
-        x86_64|amd64) echo "x86_64" ;;
-        aarch64|arm64) echo "aarch64" ;;
-        armv7l)        echo "armv7" ;;
-        *) err "Unsupported architecture: $(uname -m)" ;;
+    local arch
+    arch="$(uname -m)"
+    case "$arch" in
+        x86_64|amd64)  echo "x86_64" ;;
+        aarch64|arm64)  echo "aarch64" ;;
+        armv7l|armhf)   echo "armv7" ;;
+        *) err "Unsupported architecture: ${arch}. We support x86_64, aarch64, armv7." ;;
     esac
 }
-detect_release_tag() {
+release_platform() {
     local arch os
     arch=$(detect_arch)
     os=$(detect_os)
@@ -41,11 +73,42 @@ detect_release_tag() {
         macos-aarch64) echo "macos-arm64" ;;
         windows-x86_64) echo "windows-x64" ;;
         windows-aarch64) echo "windows-arm64" ;;
-        *) err "No release for ${arch}-${os}" ;;
+        *) err "No prebuilt release for ${arch}-${os}. Try: NO_BUILD=1 to skip." ;;
     esac
 }
 
-# ─── Sudo helper (skip if root or sudo missing) ──────────────────────────────────
+# ─── Download helper ────────────────────────────────────────────────────────
+download() {
+    local url="$1" out="$2"
+    mkdir -p "$(dirname "$out")"
+    if command -v curl >/dev/null 2>&1; then
+        if [ -n "${GITHUB_TOKEN:-}" ]; then
+            curl -fsSL -H "Authorization: token ${GITHUB_TOKEN}" -o "$out" "$url"
+        else
+            curl -fsSL -o "$out" "$url"
+        fi
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$out" "$url"
+    else
+        err "Need curl or wget to download files."
+    fi
+    [ -f "$out" ] && [ -s "$out" ]
+}
+
+download_with_retry() {
+    local url="$1" out="$2" max_attempts="${3:-3}"
+    local attempt=0
+    while [ $attempt -lt "$max_attempts" ]; do
+        attempt=$((attempt + 1))
+        if download "$url" "$out" 2>/dev/null; then
+            return 0
+        fi
+        [ $attempt -lt "$max_attempts" ] && sleep 2
+    done
+    return 1
+}
+
+# ─── Sudo helper ────────────────────────────────────────────────────────────
 maybe_sudo() {
     if [ "$(id -u)" = "0" ] || ! command -v sudo >/dev/null 2>&1; then
         "$@"
@@ -54,23 +117,22 @@ maybe_sudo() {
     fi
 }
 
-# ─── System dep installer ─────────────────────────────────────────────────────
+# ─── System dependencies ────────────────────────────────────────────────────
 install_system_deps() {
     local os
     os=$(detect_os)
-
     case "$os" in
         linux)
             if command -v apt-get >/dev/null 2>&1; then
                 info "Installing system dependencies (apt)..."
                 maybe_sudo apt-get update -qq
-                maybe_sudo apt-get install -y -qq curl wget git build-essential pkg-config libssl-dev unzip python3 2>/dev/null || true
+                maybe_sudo apt-get install -y -qq curl ca-certificates git build-essential pkg-config libssl-dev unzip python3 2>/dev/null || true
             elif command -v dnf >/dev/null 2>&1; then
                 info "Installing system dependencies (dnf)..."
-                maybe_sudo dnf install -y curl wget git gcc gcc-c++ make pkg-config openssl-devel unzip python3 2>/dev/null || true
+                maybe_sudo dnf install -y curl ca-certificates git gcc gcc-c++ make pkg-config openssl-devel unzip python3 2>/dev/null || true
             elif command -v apk >/dev/null 2>&1; then
                 info "Installing system dependencies (apk)..."
-                maybe_sudo apk add curl wget git build-base openssl-dev pkgconfig unzip python3 2>/dev/null || true
+                maybe_sudo apk add curl ca-certificates git build-base openssl-dev pkgconfig unzip python3 2>/dev/null || true
             else
                 warn "Unknown package manager. Ensure curl, git, build tools are installed."
             fi
@@ -82,175 +144,132 @@ install_system_deps() {
             fi
             if command -v brew >/dev/null 2>&1; then
                 info "Installing dependencies (brew)..."
-                brew install curl wget git 2>/dev/null || true
+                brew install curl git 2>/dev/null || true
             fi
             ;;
-        windows) ;; # Assume Git Bash / MSYS2 has deps
     esac
 }
 
-# ─── Check prerequisites ──────────────────────────────────────────────────────
-check_prereqs() {
-    for cmd in curl wget; do
-        if command -v "$cmd" >/dev/null 2>&1; then
-            DOWNLOAD_CMD="$cmd"
-            break
-        fi
-    done
-    [ -n "${DOWNLOAD_CMD:-}" ] || err "Need curl or wget."
-
-    # Check git (needed for source build fallback)
-    command -v git >/dev/null 2>&1 || warn "git not found. Source build will fail."
-
-    # Check/install Node.js via nvm
-    if ! command -v node >/dev/null 2>&1; then
-        warn "Node.js not found. Installing via nvm..."
-        export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-        # Install nvm
-        if [ ! -s "$NVM_DIR/nvm.sh" ]; then
-            if [ "$DOWNLOAD_CMD" = "curl" ]; then
-                curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash
-            else
-                wget -qO- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash
-            fi
-        fi
-        # Source and install Node
-        [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-        nvm install 22 2>/dev/null || nvm install --lts 2>/dev/null
-        nvm use 22 2>/dev/null || nvm use default 2>/dev/null
-        # Re-check
-        command -v node >/dev/null 2>&1 || err "Node.js install failed."
-        ok "Node.js $(node -v) installed"
-    fi
-    # Ensure npm and npx are available
-    command -v npm >/dev/null 2>&1 || err "npm not found."
-    command -v npx >/dev/null 2>&1 || npm install -g npx 2>/dev/null || true
-
-    # Check/install Rust via rustup
-    if ! command -v cargo >/dev/null 2>&1; then
-        warn "Rust not found. Installing via rustup..."
-        if [ "$DOWNLOAD_CMD" = "curl" ]; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        else
-            wget -qO- https://sh.rustup.rs | sh -s -- -y
-        fi
-        [ -s "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-        command -v cargo >/dev/null 2>&1 || err "Rust install failed."
-        ok "Rust $(rustc --version) installed"
-    fi
-}
-
-# ─── Download pre-built release ────────────────────────────────────────────────
+# ─── Download prebuilt release ──────────────────────────────────────────────
 download_release() {
     local platform="$1"
-    local url
 
+    # Determine download URL
+    local url
     if [ "$VERSION" = "latest" ]; then
         url="${REPO_URL}/releases/latest/download/termweb-${platform}.tar.gz"
     else
         url="${REPO_URL}/releases/download/${VERSION}/termweb-${platform}.tar.gz"
     fi
 
-    info "Downloading termweb for ${platform}..."
-    mkdir -p "$DATA_DIR"
+    info "Downloading release for ${platform}..."
+    info "  ${url}"
 
-    local tmpdir
-    tmpdir=$(mktemp -d)
-    local archive="${tmpdir}/termweb.tar.gz"
+    TEMP_DIR="$(mktemp -d)"
+    local archive="${TEMP_DIR}/termweb-${platform}.tar.gz"
 
-    if [ "$DOWNLOAD_CMD" = "curl" ]; then
-        curl -fsSL "$url" -o "$archive"
-    else
-        wget -qO "$archive" "$url"
+    if ! download_with_retry "$url" "$archive" 3; then
+        warn "Release download failed. ${platform} may not be built yet."
+        return 1
     fi
 
-    # Verify it's a valid tar
+    # Validate archive
     if ! tar tzf "$archive" >/dev/null 2>&1; then
-        rm -rf "$tmpdir"
+        warn "Downloaded archive is invalid/corrupt."
         return 1
     fi
 
-    tar xzf "$archive" -C "$DATA_DIR" --strip-components=0 2>/dev/null || \
-    tar xzf "$archive" -C "$DATA_DIR" 2>/dev/null || {
-        rm -rf "$tmpdir"
-        return 1
-    }
+    # Extract to DATA_DIR
+    mkdir -p "$DATA_DIR"
+    tar xzf "$archive" -C "$TEMP_DIR" 2>/dev/null || true
 
-    rm -rf "$tmpdir"
+    # Handle both tar.gz structures: with/without subdirectory
+    if [ -d "$TEMP_DIR/$platform" ]; then
+        cp -r "$TEMP_DIR/$platform"/* "$DATA_DIR/" 2>/dev/null || true
+    else
+        # Try extracting directly
+        tar xzf "$archive" -C "$DATA_DIR" 2>/dev/null || true
+    fi
 
     # Verify essential files exist
-    if [ -f "$DATA_DIR/bcli" ] || [ -f "$DATA_DIR/termweb-server" ]; then
-        chmod +x "$DATA_DIR/bcli" "$DATA_DIR/termweb-server" "$DATA_DIR/bai" 2>/dev/null || true
-        ok "Extracted to $DATA_DIR"
+    if [ -f "$DATA_DIR/bcli" ] || [ -f "$DATA_DIR/bcli.exe" ]; then
+        chmod +x "$DATA_DIR/bcli" "$DATA_DIR/termweb-server" "$DATA_DIR/bai" "$DATA_DIR/termweb" 2>/dev/null || true
+        ok "Prebuilt binaries extracted to ${DATA_DIR}"
         return 0
     fi
+
+    warn "Release archive didn't contain expected binaries."
     return 1
 }
 
-# ─── Build from source ────────────────────────────────────────────────────────
+# ─── Build from source ──────────────────────────────────────────────────────
 build_from_source() {
     local src_dir="$DATA_DIR/source"
     mkdir -p "$src_dir"
 
-    info "Building from source..."
+    info "Building from source (may take 5-10 minutes)..."
 
     # Clone or pull
     if [ -d "$src_dir/.git" ]; then
         (cd "$src_dir" && git pull --ff-only)
     else
-        git clone "${REPO_URL}.git" "$src_dir"
+        git clone --depth 1 "${REPO_URL}.git" "$src_dir"
     fi
 
     cd "$src_dir"
 
+    # Install npm deps
     info "Installing npm dependencies..."
-    npm install --omit=optional 2>&1 | tail -3 || npm install 2>&1 | tail -3
+    npm install --omit=optional 2>&1 | tail -2 || true
 
-    info "Building Rust client (this may take a while)..."
-    (cd client-rs && cargo build --release)
-
-    info "Copying binaries to ${DATA_DIR}..."
+    # Build Rust client
+    info "Building Rust client (cargo build --release)..."
+    (cd client-rs && cargo build --release 2>&1 | tail -5)
     cp client-rs/target/release/bcli "$DATA_DIR/bcli"
     chmod +x "$DATA_DIR/bcli"
 
-    # Create server launcher
-    cat > "$DATA_DIR/termweb-server" << 'SEA_LAUNCHER'
+    # Create termweb-server launcher
+    cp -r server shared config "$DATA_DIR/" 2>/dev/null || true
+    cat > "$DATA_DIR/termweb-server" << 'SEA'
 #!/usr/bin/env node
 require('./server/index.js');
-SEA_LAUNCHER
+SEA
     chmod +x "$DATA_DIR/termweb-server"
-    cp -r server "$DATA_DIR/server"
-    cp -r shared "$DATA_DIR/shared"
-    cp -r config "$DATA_DIR/config"
 
-    # Copy bai
+    # Copy other assets
     cp bin/bai "$DATA_DIR/bai"
     chmod +x "$DATA_DIR/bai"
     cp scripts/download-chrome.js "$DATA_DIR/download-chrome.js"
-
-    # Copy node_modules for server
     cp -r node_modules "$DATA_DIR/node_modules" 2>/dev/null || true
 
-    cd "$DATA_DIR"
-    ok "Build complete"
+    ok "Source build complete"
+    cd "$OLDPWD"
 }
 
-# ─── Download Chrome ──────────────────────────────────────────────────────────
+# ─── Chrome setup ───────────────────────────────────────────────────────────
 setup_chrome() {
+    [ -n "${NO_CHROME:-}" ] && { info "Skipping Chrome download (NO_CHROME set)"; return; }
+
     local chrome_path_file="$DATA_DIR/chrome-path.txt"
 
+    # Check if already configured
     if [ -f "$chrome_path_file" ]; then
         local existing
         existing=$(cat "$chrome_path_file")
         if [ -n "$existing" ] && [ -f "$existing" ]; then
-            ok "Chrome already at: $existing"
+            ok "Chrome already at: ${existing}"
             return
         fi
     fi
 
-    info "Downloading Chrome (headless browser for page rendering)..."
+    # Check env var
+    if [ -n "${CHROME_PATH:-}" ] && [ -f "$CHROME_PATH" ]; then
+        echo "$CHROME_PATH" > "$chrome_path_file"
+        ok "Chrome configured: ${CHROME_PATH}"
+        return
+    fi
 
-    # Check if system Chrome exists
+    # Check system Chrome
     local system_chrome=""
     for c in google-chrome google-chrome-stable chromium chromium-browser chrome; do
         if command -v "$c" >/dev/null 2>&1; then
@@ -262,11 +281,11 @@ setup_chrome() {
     if [ -n "$system_chrome" ]; then
         info "Using system Chrome: ${system_chrome}"
         echo "$system_chrome" > "$chrome_path_file"
-        ok "Chrome configured: ${system_chrome}"
         return
     fi
 
-    # Try using @puppeteer/browsers to download Chrome for Testing
+    # Download Chrome for Testing via npx
+    info "Downloading Chrome (headless browser for page rendering)..."
     if command -v npx >/dev/null 2>&1; then
         local platform_flag
         case "$(detect_os)" in
@@ -275,14 +294,12 @@ setup_chrome() {
             windows) platform_flag="win32" ;;
         esac
 
-        info "Downloading Chrome via @puppeteer/browsers..."
         mkdir -p "$DATA_DIR/chrome"
         npx -y @puppeteer/browsers install chrome@stable \
             --path "$DATA_DIR/chrome" \
-            --platform "$platform_flag" 2>&1 | tail -3 || \
-        npx -y playwright install chromium 2>&1 | tail -3 || {
-            warn "Auto Chrome download failed."
-            warn "Install Chrome manually or set CHROME_PATH env var."
+            --platform "$platform_flag" 2>&1 | tail -2 || \
+        npx -y playwright install chromium 2>&1 | tail -2 || {
+            warn "Chrome auto-download failed. Install Chrome manually or set CHROME_PATH."
             return
         }
 
@@ -290,52 +307,87 @@ setup_chrome() {
         chrome_binary=$(find "$DATA_DIR/chrome" -name "chrome" -o -name "chrome.exe" 2>/dev/null | head -1 || true)
         if [ -n "$chrome_binary" ]; then
             echo "$chrome_binary" > "$chrome_path_file"
-            ok "Chrome ready: ${chrome_binary}"
-        else
-            # Try to find in standard puppeteer path
-            chrome_binary=$(find "$HOME/.cache" -name "chrome" -type f 2>/dev/null | head -1 || true)
-            if [ -n "$chrome_binary" ]; then
-                echo "$chrome_binary" > "$chrome_path_file"
-                ok "Chrome found: ${chrome_binary}"
-            fi
+            ok "Chrome downloaded: ${chrome_binary}"
         fi
     fi
 }
 
-# ─── Create launcher scripts ──────────────────────────────────────────────────
+# ─── Create launchers ───────────────────────────────────────────────────────
 create_launchers() {
     mkdir -p "$INSTALL_DIR"
 
-    # termweb — master launcher
+    # termweb master launcher
     cat > "$INSTALL_DIR/termweb" << 'LAUNCHER'
 #!/usr/bin/env bash
 set -euo pipefail
 DATA_DIR="${HOME}/.termweb"
-CHROME_PATH="$(cat "${DATA_DIR}/chrome-path.txt" 2>/dev/null || echo "")"
 PID_FILE="/tmp/termweb-server.pid"
 
-# Handle --help
+show_help() {
+    cat << 'HELP'
+TermWeb Browser — Terminal-based web browser & automation tool
+
+Usage:
+  termweb                          Connect to running server (default)
+  termweb --server [--url URL]     Start server + connect
+  termweb -s [--url URL]           Short alias for --server
+
+Server options:
+  --chrome <path>    Chrome binary path (default: auto-detect)
+  --port <port>      Server port (default: 9222)
+  --url <url>        Initial URL to navigate to
+
+Controls (text mode):
+  Arrow keys         Navigate elements / scroll
+  Enter              Click focused element
+  Tab/Shift+Tab      Cycle focus
+  Ctrl+L             Enter URL
+  Ctrl+F             Find in page
+  Ctrl+R             Refresh
+  Ctrl+0             Browser mode (settings panel)
+  Ctrl+B / Alt+←     Go back
+  Ctrl+N / Alt+→     Go forward
+  Ctrl+T             New tab
+  Ctrl+W             Close tab
+  Ctrl+1-9           Switch tab
+  Ctrl+C             Disconnect (server keeps running)
+
+CLI commands (`termweb nav https://x.com`):
+  nav <url>          Navigate to URL
+  text               Extract page text
+  links              Extract all links
+  elements           Extract interactive elements
+  click <selector>   Click element
+  type <sel> <text>  Type into element
+  eval <code>        Run JavaScript
+  screenshot [path]  Take screenshot
+  status             Session status
+  back/forward       History navigation
+  scroll <px>        Scroll page
+  wait <ms>          Wait
+  find <text>        Find in page
+  session <action>   Create/destroy/status
+
+Examples:
+  termweb --server --url https://example.com   # Quick start
+  termweb https://example.com                   # Navigate
+  termweb text                                  # Read page
+  termweb click '#btn'                          # Click button
+HELP
+}
+
 if [ "$*" = "--help" ] || [ "$*" = "-h" ]; then
-    echo "TermWeb Browser — Terminal-based web browser"
-    echo ""
-    echo "Usage:"
-    echo "  termweb                          Connect to running server"
-    echo "  termweb --server <url>           Start server + connect"
-    echo "  termweb --server --url <url>     (same)"
-    echo ""
-    echo "Server options:"
-    echo "  --chrome <path>    Chrome binary path"
-    echo "  --port <port>      Server port (default: 9222)"
-    echo "  --url <url>        Initial URL to navigate to"
-    echo ""
-    echo "Examples:"
-    echo "  termweb --server --url https://example.com"
+    show_help
     exit 0
 fi
 
-# Start server if requested (or no server running)
+BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+BROWSER_BIN="${BIN_DIR}/bcli"
+SERVER_BIN="${BIN_DIR}/termweb-server"
+
+# Start server if --server flag or no server running
 START_SERVER=false
-if [ "$*" = "--server" ] || [ "$*" = "-s" ] || [[ "$*" == *"--server"* ]]; then
+if [[ " $* " == *" --server "* ]] || [[ " $* " == *" -s "* ]]; then
     START_SERVER=true
 fi
 if [ ! -f "$PID_FILE" ] || ! kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
@@ -343,192 +395,241 @@ if [ ! -f "$PID_FILE" ] || ! kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
 fi
 
 if [ "$START_SERVER" = true ]; then
-    # Ensure Chrome exists
-    if [ ! -f "$CHROME_PATH" ]; then
-        echo "Chrome not found. Downloading..."
-        node "$(dirname "$0")/../download-chrome.js" 2>/dev/null || \
-        node "$DATA_DIR/download-chrome.js" 2>/dev/null || true
-        CHROME_PATH="$(cat "${DATA_DIR}/chrome-path.txt" 2>/dev/null || echo "")"
-    fi
-
-    echo "Starting termweb-server..."
-    SERVER_BIN="${DATA_DIR}/termweb-server"
-    if [ ! -f "$SERVER_BIN" ]; then
-        # Try node-based server
-        if [ -f "${DATA_DIR}/server/index.js" ]; then
-            SERVER_BIN="node ${DATA_DIR}/server/index.js"
-        else
-            echo "Error: termweb-server not found in ${DATA_DIR}"
-            exit 1
-        fi
+    if [ -f "${DATA_DIR}/chrome-path.txt" ]; then
+        CHROME_PATH="$(cat "${DATA_DIR}/chrome-path.txt")"
     fi
 
     ARGS=""
-    if [ -n "$CHROME_PATH" ]; then
-        ARGS="$ARGS --chrome \"$CHROME_PATH\""
-    fi
-    if [ -n "${TERMWEB_PORT:-}" ]; then
-        ARGS="$ARGS --port ${TERMWEB_PORT}"
-    fi
+    [ -n "${CHROME_PATH:-}" ] && ARGS="$ARGS --chrome \"$CHROME_PATH\""
+    [ -n "${TERMWEB_PORT:-}" ] && ARGS="$ARGS --port ${TERMWEB_PORT}"
 
-    # Extract URL from args if present
+    # Extract URL from args
     for arg in "$@"; do
         case "$arg" in
             --url=*) ARGS="$ARGS $arg" ;;
-            --url) ;; # skip, next arg will be the url
             http://*|https://*) ARGS="$ARGS --url $arg" ;;
         esac
     done
 
-    eval "nohup $SERVER_BIN $ARGS > \"${DATA_DIR}/server.log\" 2>&1 &"
+    export NODE_ENV=production
+    nohup "$SERVER_BIN" $ARGS > "${DATA_DIR}/server.log" 2>&1 &
     echo $! > "$PID_FILE"
     sleep 2
 
     if kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
         echo "Server started (PID $(cat "$PID_FILE"))"
     else
-        echo "Server failed to start. Check ${DATA_DIR}/server.log"
+        echo "Server failed. Check ${DATA_DIR}/server.log"
         exit 1
     fi
+
+    # Remove --server and -s from args before forwarding to bcli
+    NEW_ARGS=()
+    for arg in "$@"; do
+        case "$arg" in --server|-s) ;; *) NEW_ARGS+=("$arg") ;; esac
+    done
+    set -- "${NEW_ARGS[@]}"
 fi
 
-# Launch client
-exec "$DATA_DIR/bcli" "$@"
+exec "$BROWSER_BIN" "$@"
 LAUNCHER
     chmod +x "$INSTALL_DIR/termweb"
 
-    # Convenience symlinks
+    # Symlink individual commands
     for bin in bcli termweb-server bai; do
         if [ -f "$DATA_DIR/$bin" ]; then
             ln -sf "$DATA_DIR/$bin" "$INSTALL_DIR/$bin" 2>/dev/null || true
         fi
     done
 
-    ok "Launchers created in $INSTALL_DIR"
+    ok "Launchers created in ${INSTALL_DIR}"
 }
 
-# ─── PATH setup ────────────────────────────────────────────────────────────────
+# ─── PATH setup ─────────────────────────────────────────────────────────────
 add_to_path() {
     case ":$PATH:" in
         *":${INSTALL_DIR}:"*) return ;;
     esac
 
     local rc_files=()
-    if [ -f "$HOME/.zshrc" ]; then rc_files+=("$HOME/.zshrc"); fi
-    if [ -f "$HOME/.bashrc" ]; then rc_files+=("$HOME/.bashrc"); fi
-    if [ -f "$HOME/.bash_profile" ] && [ ! -f "$HOME/.bashrc" ]; then rc_files+=("$HOME/.bash_profile"); fi
-    if [ -f "$HOME/.config/fish/config.fish" ]; then rc_files+=("$HOME/.config/fish/config.fish"); fi
-    # If no rc file found, create .bashrc
-    if [ ${#rc_files[@]} -eq 0 ]; then
-        rc_files+=("$HOME/.bashrc")
-    fi
+    [ -f "$HOME/.zshrc" ] && rc_files+=("$HOME/.zshrc")
+    [ -f "$HOME/.bashrc" ] && rc_files+=("$HOME/.bashrc")
+    [ -f "$HOME/.bash_profile" ] && [ ! -f "$HOME/.bashrc" ] && rc_files+=("$HOME/.bash_profile")
+    [ -f "$HOME/.config/fish/config.fish" ] && rc_files+=("$HOME/.config/fish/config.fish")
+    [ ${#rc_files[@]} -eq 0 ] && rc_files+=("$HOME/.bashrc")
 
-    local added=false
     for rc in "${rc_files[@]}"; do
         if [ -f "$rc" ]; then
-            echo "" >> "$rc"
-            echo "# Added by termweb-browser installer" >> "$rc"
-            echo "export PATH=\"\$PATH:${INSTALL_DIR}\"" >> "$rc"
+            {
+                echo ""
+                echo "# Added by termweb-browser installer"
+                echo "export PATH=\"\$PATH:${INSTALL_DIR}\""
+            } >> "$rc"
             ok "Added ${INSTALL_DIR} to ${rc}"
-            added=true
-            break
+            return
         fi
     done
+    # Fallback
+    echo "export PATH=\"\$PATH:${INSTALL_DIR}\"" >> "$HOME/.bashrc"
+    ok "Added PATH to ~/.bashrc"
+}
 
-    if [ "$added" = false ]; then
-        echo "export PATH=\"\$PATH:${INSTALL_DIR}\"" >> "$HOME/.bashrc"
-        ok "Added ${INSTALL_DIR} to ~/.bashrc"
+# ─── Install AI agent skill ────────────────────────────────────────────────
+install_skill() {
+    local skill_script
+    skill_script="$(dirname "$0")/install-skill.sh"
+    if [ -f "$skill_script" ]; then
+        header "AI Agent Skill Installation"
+        info "Detecting AI agents and installing browser skill..."
+        bash "$skill_script" 2>&1 | sed 's/^/  /' || true
     fi
 }
 
-# ─── Help ──────────────────────────────────────────────────────────────────────
+# ─── Help ──────────────────────────────────────────────────────────────────
 show_help() {
     cat << 'HELP'
-TermWeb Browser — One-line Installer
+╔══════════════════════════════════════════════════════════╗
+║    TermWeb Browser — Zero-Setup Installer                 ║
+╚══════════════════════════════════════════════════════════╝
 
 Usage:
-  curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/refs/heads/main/scripts/install.sh | bash
-  curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/refs/heads/main/scripts/install.sh | bash -s v1.0.0
+  curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/main/scripts/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/main/scripts/install.sh | bash -s v1.0.0
 
-Environment variables:
-  INSTALL_DIR    Binary installation directory (default: ~/.local/bin)
-  DATA_DIR       Data directory for binaries and config (default: ~/.termweb)
-  CHROME_PATH    Path to existing Chrome/Chromium binary (skip auto-download)
-  TERMWEB_PORT   Server port (default: 9222)
+Environment:
+  INSTALL_DIR    Binary installation directory  (default: ~/.local/bin)
+  DATA_DIR       Data directory                 (default: ~/.termweb)
+  CHROME_PATH    Path to existing Chrome        (skip auto-download)
+  TERMWEB_PORT   Server port                    (default: 9222)
+  NO_BUILD       Skip source build fallback     (any non-empty)
+  NO_CHROME      Skip Chrome download           (any non-empty)
+  GITHUB_TOKEN   For authenticated API requests
 
 What it does:
-  1. Detects your OS and architecture
-  2. Installs Node.js (via nvm) and Rust (via rustup) if missing
-  3. Downloads pre-built release from GitHub, or builds from source
-  4. Downloads Chrome/Chromium for headless page rendering
-  5. Creates 'termweb' command in ~/.local/bin
-  6. Adds ~/.local/bin to your PATH
+  1. Detects OS + architecture
+  2. Installs system dependencies (curl, git, build tools)
+  3. Installs Node.js + Rust if needed (for source build fallback)
+  4. Downloads prebuilt binary from GitHub Releases
+  5. Falls back to source build if no prebuilt release
+  6. Downloads Chrome/Chromium for headless rendering
+  7. Creates 'termweb' launcher in INSTALL_DIR
+  8. Adds INSTALL_DIR to PATH
+  9. Installs AI agent skill for opencode, claude, etc.
 
 After install:
   termweb --server --url https://example.com
+  bcli text
+  bai status
 HELP
     exit 0
 }
 
-# ─── Main ──────────────────────────────────────────────────────────────────────
+# ─── Check Node.js and Rust (for source build) ─────────────────────────────
+ensure_node() {
+    if command -v node >/dev/null 2>&1; then
+        return
+    fi
+    warn "Node.js not found. Installing via nvm..."
+    export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+    if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash
+        else
+            wget -qO- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash
+        fi
+    fi
+    [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+    nvm install 22 2>/dev/null || nvm install --lts 2>/dev/null
+    nvm use 22 2>/dev/null || nvm use default 2>/dev/null
+    command -v node >/dev/null 2>&1 || err "Node.js install failed."
+    ok "Node.js $(node -v) installed"
+}
+
+ensure_rust() {
+    if command -v cargo >/dev/null 2>&1; then
+        return
+    fi
+    warn "Rust not found. Installing via rustup..."
+    if command -v curl >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    else
+        wget -qO- https://sh.rustup.rs | sh -s -- -y
+    fi
+    [ -s "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+    command -v cargo >/dev/null 2>&1 || err "Rust install failed."
+    ok "Rust $(rustc --version) installed"
+}
+
+# ─── Main ──────────────────────────────────────────────────────────────────
 main() {
     for arg in "$@"; do
-        case "$arg" in
-            --help|-h) show_help ;;
-        esac
+        case "$arg" in --help|-h) show_help ;; esac
     done
 
     echo ""
-    printf "\033[1;36m╔══════════════════════════════════════════╗\033[0m\n"
-    printf "\033[1;36m║   TermWeb Browser — Zero-Setup Installer  ║\033[0m\n"
-    printf "\033[1;36m╚══════════════════════════════════════════╝\033[0m\n"
+    printf "\033[1;36m╔══════════════════════════════════════════════╗\033[0m\n"
+    printf "\033[1;36m║   TermWeb Browser — Production Installer     ║\033[0m\n"
+    printf "\033[1;36m╚══════════════════════════════════════════════╝\033[0m\n"
     echo ""
 
     local os arch platform
     os=$(detect_os)
     arch=$(detect_arch)
-    platform=$(detect_release_tag)
-    info "Detected: ${arch}-${os} → ${platform}"
+    platform=$(release_platform)
+    info "Detected: ${os} ${arch}  →  package: ${platform}"
 
+    # Step 1: System deps
+    header "System Dependencies"
     install_system_deps
-    check_prereqs
 
-    # Try pre-built first
+    # Step 2: Try prebuilt binary
+    header "Installing termweb-browser"
     if download_release "$platform"; then
-        ok "Pre-built binary installed"
+        ok "Prebuilt binary installed"
+    elif [ -n "${NO_BUILD:-}" ]; then
+        err "No prebuilt binary for ${platform} and NO_BUILD is set. Create a release first."
     else
-        warn "No pre-built release for ${platform}. Building from source..."
-        info "This will take 5-10 minutes on the first run."
+        warn "No prebuilt release for ${platform}. Building from source..."
+        ensure_node
+        ensure_rust
         build_from_source
     fi
 
+    # Step 3: Chrome
+    header "Chrome/Chromium"
     setup_chrome
+
+    # Step 4: Launchers
+    header "Launcher Scripts"
     create_launchers
+
+    # Step 5: PATH
+    header "PATH Setup"
     add_to_path
 
-    # Auto-install AI agent skill
-    if [ -f "$(dirname "$0")/install-skill.sh" ]; then
-        echo ""
-        info "Detecting AI agents and installing browser skill..."
-        bash "$(dirname "$0")/install-skill.sh" 2>&1 | sed 's/^/  /'
-    fi
+    # Step 6: AI Agent skill
+    install_skill
 
+    # Done
     echo ""
     ok "Installation complete!"
     echo ""
-    echo "  Run:  termweb --server --url https://example.com"
+    echo "  Quick start:"
+    echo "    termweb --server --url https://example.com"
     echo ""
-    echo "  Or:   bcli -c ws://127.0.0.1:9222/browser"
-    echo "        (if server is already running)"
+    echo "  Commands:"
+    echo "    termweb <command>     Interactive or CLI mode"
+    echo "    bcli <command>        Same as above"
+    echo "    bai status            AI agent: check status"
+    echo "    termweb-server        Start daemon only"
     echo ""
 
-    # Check if we need to source profile
+    # Remind about PATH
     case ":$PATH:" in
         *":${INSTALL_DIR}:"*) ;;
         *)
             echo "  Restart your shell or run:"
             echo "    export PATH=\"\$PATH:${INSTALL_DIR}\""
-            echo "    termweb --server --url https://example.com"
             echo ""
             ;;
     esac
