@@ -153,42 +153,58 @@ install_system_deps() {
 # ─── Download prebuilt release ──────────────────────────────────────────────
 download_release() {
     local platform="$1"
+    local os
+    os=$(detect_os)
 
-    # Determine download URL
+    # Determine archive extension and download URL
+    local ext="tar.gz"
+    [ "$os" = "windows" ] && ext="zip"
+
     local url
     if [ "$VERSION" = "latest" ]; then
-        url="${REPO_URL}/releases/latest/download/termweb-${platform}.tar.gz"
+        url="${REPO_URL}/releases/latest/download/termweb-${platform}.${ext}"
     else
-        url="${REPO_URL}/releases/download/${VERSION}/termweb-${platform}.tar.gz"
+        url="${REPO_URL}/releases/download/${VERSION}/termweb-${platform}.${ext}"
     fi
 
     info "Downloading release for ${platform}..."
     info "  ${url}"
 
     TEMP_DIR="$(mktemp -d)"
-    local archive="${TEMP_DIR}/termweb-${platform}.tar.gz"
+    local archive="${TEMP_DIR}/termweb-${platform}.${ext}"
 
     if ! download_with_retry "$url" "$archive" 3; then
         warn "Release download failed. ${platform} may not be built yet."
         return 1
     fi
 
-    # Validate archive
-    if ! tar tzf "$archive" >/dev/null 2>&1; then
-        warn "Downloaded archive is invalid/corrupt."
-        return 1
-    fi
-
-    # Extract to DATA_DIR
+    # Validate & extract
     mkdir -p "$DATA_DIR"
-    tar xzf "$archive" -C "$TEMP_DIR" 2>/dev/null || true
+
+    if [ "$os" = "windows" ]; then
+        if ! unzip -t "$archive" >/dev/null 2>&1; then
+            warn "Downloaded archive is invalid/corrupt."
+            return 1
+        fi
+        unzip -o "$archive" -d "$TEMP_DIR" 2>/dev/null || true
+    else
+        if ! tar tzf "$archive" >/dev/null 2>&1; then
+            warn "Downloaded archive is invalid/corrupt."
+            return 1
+        fi
+        tar xzf "$archive" -C "$TEMP_DIR" 2>/dev/null || true
+    fi
 
     # Handle both tar.gz structures: with/without subdirectory
     if [ -d "$TEMP_DIR/$platform" ]; then
         cp -r "$TEMP_DIR/$platform"/* "$DATA_DIR/" 2>/dev/null || true
     else
         # Try extracting directly
-        tar xzf "$archive" -C "$DATA_DIR" 2>/dev/null || true
+        if [ "$os" = "windows" ]; then
+            cp -r "$TEMP_DIR"/* "$DATA_DIR/" 2>/dev/null || true
+        else
+            tar xzf "$archive" -C "$DATA_DIR" 2>/dev/null || true
+        fi
     fi
 
     # Verify essential files exist
