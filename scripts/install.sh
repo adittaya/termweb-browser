@@ -32,6 +32,15 @@ detect_arch() {
 }
 detect_platform() { echo "$(detect_arch)-$(detect_os)"; }
 
+# ─── Sudo helper (skip if root or sudo missing) ──────────────────────────────────
+maybe_sudo() {
+    if [ "$(id -u)" = "0" ] || ! command -v sudo >/dev/null 2>&1; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
 # ─── System dep installer ─────────────────────────────────────────────────────
 install_system_deps() {
     local os
@@ -41,14 +50,14 @@ install_system_deps() {
         linux)
             if command -v apt-get >/dev/null 2>&1; then
                 info "Installing system dependencies (apt)..."
-                sudo apt-get update -qq
-                sudo apt-get install -y -qq curl wget git build-essential pkg-config libssl-dev unzip python3 2>/dev/null || true
+                maybe_sudo apt-get update -qq
+                maybe_sudo apt-get install -y -qq curl wget git build-essential pkg-config libssl-dev unzip python3 2>/dev/null || true
             elif command -v dnf >/dev/null 2>&1; then
                 info "Installing system dependencies (dnf)..."
-                sudo dnf install -y curl wget git gcc gcc-c++ make pkg-config openssl-devel unzip python3 2>/dev/null || true
+                maybe_sudo dnf install -y curl wget git gcc gcc-c++ make pkg-config openssl-devel unzip python3 2>/dev/null || true
             elif command -v apk >/dev/null 2>&1; then
                 info "Installing system dependencies (apk)..."
-                sudo apk add curl wget git build-base openssl-dev pkgconfig unzip python3 2>/dev/null || true
+                maybe_sudo apk add curl wget git build-base openssl-dev pkgconfig unzip python3 2>/dev/null || true
             else
                 warn "Unknown package manager. Ensure curl, git, build tools are installed."
             fi
