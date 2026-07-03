@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use base64::Engine;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
@@ -151,8 +151,6 @@ enum Command {
         /// Action: create, destroy, status
         action: String,
     },
-    #[command(external_subcommand)]
-    Raw(Vec<String>),
 }
 
 #[tokio::main]
@@ -283,7 +281,8 @@ async fn run_command(ws_url: &str, cmd: &Command) -> Result<()> {
                 Message::new(types::CLICK, serde_json::json!({"x": cx, "y": cy, "button": "left"}))
             };
             write.send(WsMessage::Text(msg.to_json().into())).await?;
-            let loc = selector.as_deref().unwrap_or(&format!("({}, {})", x.unwrap_or(0), y.unwrap_or(0)));
+            let loc_str = format!("({}, {})", x.unwrap_or(0), y.unwrap_or(0));
+            let loc = selector.as_deref().unwrap_or(&loc_str);
             println!("Clicked: {loc}");
         }
 
@@ -494,11 +493,6 @@ async fn run_command(ws_url: &str, cmd: &Command) -> Result<()> {
             }
         }
 
-        Command::Raw(args) => {
-            eprintln!("Unknown command: {}", args.join(" "));
-            eprintln!("Run 'bcli --help' for available commands");
-            return Err(anyhow::anyhow!("Unknown command"));
-        }
     }
 
     // Brief wait for server to process, then disconnect
@@ -800,7 +794,8 @@ fn handle_command(state: &mut DisplayState, cmd: &str) -> Option<String> {
                                 }
                                 "Enter" => {
                                     if let Some(idx) = state.focus_idx {
-                                        if let Some(el) = state.page_elements.get(idx) {
+                                        let el = state.page_elements.get(idx).cloned();
+                                        if let Some(el) = el {
                                             // Input/text areas → enter typing mode
                                             if el.input_type.is_some() {
                                                 state.mode = Mode::ElementInput { element_id: idx };
@@ -808,7 +803,7 @@ fn handle_command(state: &mut DisplayState, cmd: &str) -> Option<String> {
                                                 return None;
                                             }
                                             // Otherwise click the element
-                                            return handle_element_click(state, el);
+                                            return handle_element_click(state, &el);
                                         }
                                     }
                                 }
@@ -1276,7 +1271,7 @@ async fn handle_normal_input(
 
 async fn handle_element_input(
     k: &input::KeyInput,
-    element_id: usize,
+    _element_id: usize,
     mode: &mut Mode,
     tx: &mpsc::Sender<String>,
 ) {

@@ -337,7 +337,7 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, state: &DisplayState) {
             } else { String::new() }
         }
         Mode::Browser { menu_idx } => {
-            if let Some(item) = BROWSER_MENU.get(*menu_idx) {
+            if let Some(item) = BROWSER_MENU.get(menu_idx) {
                 format!("{} {} ", item.icon, item.label)
             } else { String::new() }
         }
