@@ -506,6 +506,13 @@ main() {
     create_launchers
     add_to_path
 
+    # Auto-install AI agent skill
+    if [ -f "$(dirname "$0")/install-skill.sh" ]; then
+        echo ""
+        info "Detecting AI agents and installing browser skill..."
+        bash "$(dirname "$0")/install-skill.sh" 2>&1 | sed 's/^/  /'
+    fi
+
     echo ""
     ok "Installation complete!"
     echo ""

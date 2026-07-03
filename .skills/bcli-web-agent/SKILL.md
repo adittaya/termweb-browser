@@ -1,3 +1,13 @@
+---
+name: bcli-web-agent
+description: Full web browser control via terminal — navigate pages, click elements, type text, extract data, fill forms, and bypass captchas. Use bai CLI or REST API. No GUI needed.
+license: MIT
+compatibility: opencode
+metadata:
+  category: automation
+  protocol: rest-api
+---
+
 # BCLI Web Agent Skill — Browser Control for AI Agents
 
 You are an AI agent with access to **BCLI**, a terminal-based web browser. Use BCLI to browse the web, read page content, click elements, fill forms, and extract data — all without a GUI. This skill teaches you exactly how.

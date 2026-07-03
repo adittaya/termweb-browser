@@ -102,6 +102,8 @@ curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/main/insta
 
 Auto-installs Node.js (via nvm), Rust (via rustup), Chrome, and all commands into `~/.local/bin`.
 
+**After install, the installer automatically detects your AI agents** (opencode, claude, gemini-cli, etc.) and installs the `bcli-web-agent` skill into each one's config directory — no manual setup needed.
+
 ### Manual
 
 ```bash
@@ -116,6 +118,9 @@ node bin/install.js /usr/local         # /usr/local/bin/bcli
 
 # Or via npm:
 npm link
+
+# Install skill for AI agents (opencode, claude, etc.)
+bash scripts/install-skill.sh
 ```
 
 The shell wrapper at `bin/bcli` auto-builds the Rust client on first run.

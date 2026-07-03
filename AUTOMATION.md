@@ -29,7 +29,7 @@ A practical guide to building reliable browser automations with TermWeb's REST A
 curl -fsSL https://raw.githubusercontent.com/adittaya/termweb-browser/main/install.sh | bash
 ```
 
-Installs everything: Node.js, Rust, Chrome, and the `termweb`, `bcli`, `bai`, `termweb-server` commands.
+Installs everything: Node.js, Rust, Chrome, the `termweb`/`bcli`/`bai`/`termweb-server` commands, **and automatically detects your AI agents** (opencode, claude, gemini-cli, etc.) to install the browser automation skill into each one.
 
 ### Try it out
 
@@ -415,6 +415,28 @@ bai click "#search-btn"
 ## AI Agent Integration
 
 TermWeb's REST API is designed for LLM consumption. AI agents can read the page, decide what to do, and execute commands — all through text.
+
+### Auto-detection of AI agents
+
+The installer (`scripts/install-skill.sh`) automatically detects which AI coding agents you have installed and installs the `bcli-web-agent` skill into each one:
+
+| AI Agent | Config location | Skill format |
+|----------|----------------|--------------|
+| **opencode** | `~/.config/opencode/skills/bcli-web-agent/SKILL.md` | Native SKILL.md with YAML frontmatter |
+| **Claude Code** | `~/.claude/skills/bcli-web-agent/SKILL.md` | Compatible SKILL.md |
+| **Gemini CLI** | `~/.gemini/skills/bcli-web-agent/SKILL.md` | SKILL.md format |
+| **Aider** | `~/.aider/bcli-web-agent.md` | Conventions file |
+| **Cursor** | `~/.cursor/rules/bcli-web-agent.mdc` | Cursor rules format |
+| **Codex CLI** | `~/.codex/bcli-web-agent.md` | SKILL.md format |
+
+You can also run the skill installer manually at any time:
+
+```bash
+bash scripts/install-skill.sh            # auto-detect all agents
+bash scripts/install-skill.sh opencode   # install for specific agent only
+```
+
+Once installed, your AI agent can automatically discover and load the browser skill without any configuration.
 
 ### Pattern: Observe → Think → Act
 
