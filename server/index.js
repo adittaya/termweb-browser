@@ -23,6 +23,7 @@ const { WebSocketServer } = require('ws');
 const config = require('../config/default');
 const { BrowserSession, createSession } = require('./browser');
 const { handleAIRequest } = require('./ai-api');
+const { humanClick, humanMouseMove, humanType, humanScroll } = require('./human-emulation');
 
 // ─── CLI Arguments ─────────────────────────────────────────────────────────
 
@@ -38,7 +39,7 @@ const opts = {
   ),
   url: process.argv.includes('--url')
     ? process.argv[process.argv.indexOf('--url') + 1]
-    : 'https://example.com',
+    : 'about:blank',
   width: parseInt(
     process.argv.includes('--width')
       ? process.argv[process.argv.indexOf('--width') + 1]
@@ -121,19 +122,22 @@ const wss = new WebSocketServer({
 const sessions = new Map();
 let defaultSession = null;
 const startTime = Date.now();
+let wsClientCount = 0;
+let sessionDestroyTimer = null;
 
 // ─── Screenshot Streaming ─────────────────────────────────────────────────
 
 function startScreenshotStream(ws, session, interval = config.server.screenshotInterval) {
-  const timer = setInterval(async () => {
-    if (ws.readyState !== ws.OPEN) {
-      clearInterval(timer);
-      return;
-    }
+  let sending = false;
+
+  async function sendFrame() {
+    if (ws.readyState !== ws.OPEN) { ws._screenshotTimer = null; return; }
+    // Backpressure: skip if previous frame still queued
+    if (ws.bufferedAmount > 65536) { scheduleNext(); return; }
 
     try {
       const result = await session.captureScreenshot();
-      if (!result || !result.buffer) return;
+      if (!result || !result.buffer) { scheduleNext(); return; }
 
       ws.send(JSON.stringify({
         type: 'frame',
@@ -145,12 +149,15 @@ function startScreenshotStream(ws, session, interval = config.server.screenshotI
           tabId: result.tabId,
         },
       }));
-    } catch (err) {
-      // Silently continue
-    }
-  }, interval);
+    } catch (err) { /* silently continue */ }
+    scheduleNext();
+  }
 
-  ws._screenshotTimer = timer;
+  function scheduleNext() {
+    ws._screenshotTimer = setTimeout(sendFrame, interval);
+  }
+
+  scheduleNext();
 }
 
 function stopScreenshotStream(ws) {
@@ -170,6 +177,12 @@ function encode(type, payload) {
 
 wss.on('connection', async (ws, req) => {
   console.log(`[+] Client connected from ${req.socket.remoteAddress}`);
+  wsClientCount++;
+  // Cancel pending session destroy
+  if (sessionDestroyTimer) {
+    clearTimeout(sessionDestroyTimer);
+    sessionDestroyTimer = null;
+  }
 
   if (!defaultSession) {
     try {
@@ -229,7 +242,7 @@ wss.on('connection', async (ws, req) => {
           const page = resolveActivePage();
           if (page) {
             const { x, y } = defaultSession._mapCoord(payload.x, payload.y);
-            await page.mouse.click(x, y, { button: payload.button || 'left' });
+            await humanClick(page, x, y, payload.button || 'left');
           }
           break;
         }
@@ -238,6 +251,7 @@ wss.on('connection', async (ws, req) => {
           const page = resolveActivePage();
           if (page) {
             const { x, y } = defaultSession._mapCoord(payload.x, payload.y);
+            await humanMouseMove(page, x, y);
             await page.mouse.down({ button: payload.button || 'left' });
           }
           break;
@@ -247,7 +261,7 @@ wss.on('connection', async (ws, req) => {
           const page = resolveActivePage();
           if (page) {
             const { x, y } = defaultSession._mapCoord(payload.x, payload.y);
-            await page.mouse.move(x, y);
+            await humanMouseMove(page, x, y);
           }
           break;
         }
@@ -255,7 +269,6 @@ wss.on('connection', async (ws, req) => {
         case 'mouseUp': {
           const page = resolveActivePage();
           if (page) {
-            const { x, y } = defaultSession._mapCoord(payload.x, payload.y);
             await page.mouse.up({ button: payload.button || 'left' });
           }
           break;
@@ -264,7 +277,7 @@ wss.on('connection', async (ws, req) => {
         case 'scroll': {
           const page = resolveActivePage();
           if (page) {
-            await page.evaluate((dx, dy) => { window.scrollBy(dx, dy); }, payload.delta_x || 0, payload.delta_y || 0);
+            await humanScroll(page, payload.delta_y || 0);
           }
           break;
         }
@@ -272,7 +285,7 @@ wss.on('connection', async (ws, req) => {
         case 'type': {
           const page = resolveActivePage(payload.tabId);
           if (page) {
-            await page.keyboard.type(payload.text, { delay: 20 });
+            await humanType(page, payload.text);
           }
           break;
         }
@@ -370,6 +383,18 @@ wss.on('connection', async (ws, req) => {
   ws.on('close', () => {
     console.log('[-] Client disconnected');
     stopScreenshotStream(ws);
+    wsClientCount--;
+    // Destroy session after 30s idle (no clients)
+    if (wsClientCount <= 0 && defaultSession) {
+      sessionDestroyTimer = setTimeout(async () => {
+        if (wsClientCount <= 0 && defaultSession) {
+          console.log('[+] No clients connected. Destroying browser session.');
+          try { await defaultSession.close(); } catch {}
+          defaultSession = null;
+          sessions.clear();
+        }
+      }, 30000);
+    }
   });
 
   ws.on('error', (err) => {
@@ -400,9 +425,19 @@ server.listen(opts.port, opts.host, () => {
   console.log('');
 });
 
+// ─── Config Hot-Reload ────────────────────────────────────────────────────
+
+process.on('SIGHUP', () => {
+  console.log('[+] Reloading config...');
+  delete require.cache[require.resolve('../config/default')];
+  const newConfig = require('../config/default');
+  Object.assign(config, newConfig);
+  console.log(`[+] Config reloaded. screenshotInterval=${config.server.screenshotInterval}ms, jpegQuality=${config.terminal.jpegQuality}`);
+});
+
 // ─── Graceful Shutdown ────────────────────────────────────────────────────
 
-process.on('SIGINT', () => {
+function shutdown() {
   console.log('\n[+] Shutting down...');
   wss.close();
   for (const [, session] of sessions) {
@@ -411,15 +446,7 @@ process.on('SIGINT', () => {
   server.close(() => {
     process.exit(0);
   });
-});
+}
 
-process.on('SIGTERM', () => {
-  console.log('\n[+] Shutting down...');
-  wss.close();
-  for (const [, session] of sessions) {
-    session.close().catch(() => {});
-  }
-  server.close(() => {
-    process.exit(0);
-  });
-});
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

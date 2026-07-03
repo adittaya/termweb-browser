@@ -78,16 +78,16 @@ class BrowserSession {
    */
   async launch() {
     const launchOpts = {
-      headless: 'new',
+      headless: true,
       args: [...config.browser.launchArgs],
       defaultViewport: null,
       userDataDir: this.userDataDir,
       ignoreHTTPSErrors: true,
     };
 
-    // Custom executable path
+    // Custom executable path (resolve relative paths)
     if (config.browser.executablePath) {
-      launchOpts.executablePath = config.browser.executablePath;
+      launchOpts.executablePath = path.resolve(config.browser.executablePath);
     }
 
     // Proxy at browser level

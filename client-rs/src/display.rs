@@ -31,12 +31,22 @@ pub struct DisplayState {
     pub url_buffer: String,
     pub find_buffer: String,
     pub status: String,
+    pub error_log: Vec<String>,
     pub cols: u16,
     pub rows: u16,
     pub connected: bool,
     pub loading: bool,
     pub mode: Mode,
     pub tabs: Vec<TabInfo>,
+}
+
+impl DisplayState {
+    pub fn push_error(&mut self, msg: &str) {
+        self.error_log.push(msg.to_string());
+        if self.error_log.len() > 10 {
+            self.error_log.remove(0);
+        }
+    }
 }
 
 impl DisplayState {
@@ -51,6 +61,7 @@ impl DisplayState {
             url_buffer: String::new(),
             find_buffer: String::new(),
             status: String::new(),
+            error_log: Vec::new(),
             cols,
             rows,
             connected: false,
@@ -220,10 +231,15 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, state: &DisplayState) {
         String::new()
     };
 
+    let min_right = right_text.len() + 1;
     let full = if left_text.is_empty() {
         right_text
+    } else if area.width as usize <= min_right {
+        right_text
+    } else if area.width as usize <= min_right + 3 {
+        format!("{}", right_text)
     } else {
-        let avail = (area.width as usize).saturating_sub(right_text.len() + 1);
+        let avail = (area.width as usize).saturating_sub(min_right);
         if left_text.len() > avail {
             format!("{}… {}", &left_text[..avail.saturating_sub(1)], right_text)
         } else {

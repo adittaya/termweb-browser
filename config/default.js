@@ -33,12 +33,12 @@ const config = {
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
-      '--disable-software-rasterizer',
       '--disable-extensions',
       '--disable-background-networking',
       '--disable-sync',
       '--no-first-run',
       '--disable-blink-features=AutomationControlled',
+      '--disable-automation',
       '--window-size=1280,720',
     ],
 
@@ -52,8 +52,8 @@ const config = {
     // Default user agent (spoofed to look like a real Chrome browser)
     userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 
-    // Path to Chromium executable; null = use puppeteer's bundled browser
-    executablePath: '/home/adityahalder829/termweb-browser/chrome/linux-152.0.7925.0/chrome-linux64/chrome',
+    // Path to Chromium executable; null = search CHROME_PATH env, then PATH for google-chrome/chromium-browser
+    executablePath: process.env.CHROME_PATH || process.env.CHROME_BIN || null,
 
     // Timeout for page navigation (ms)
     navigationTimeout: 30000,
@@ -87,7 +87,7 @@ const config = {
     displayHeight: 40,
 
     // JPEG quality for compressed image transfer (1-100)
-    jpegQuality: 95,
+    jpegQuality: 55,
 
     // Background color for padding areas (hex)
     bgColor: '#1a1a2e',

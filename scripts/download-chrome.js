@@ -36,14 +36,24 @@ async function downloadWithPuppeteer() {
 async function downloadFallback() {
     // Fallback: download a known Chromium revision manually
     const LAST_CHROME_REVISION = '1351523'; // Recent known-good revision
+    const arch = process.arch === 'arm64' || process.arch === 'aarch64' ? 'arm64' : 'x64';
     const urls = {
-        'linux': `https://storage.googleapis.com/chrome-for-testing-public/135.0.7049.0/linux64/chrome-linux64.zip`,
-        'darwin': `https://storage.googleapis.com/chrome-for-testing-public/135.0.7049.0/mac-x64/chrome-mac-x64.zip`,
-        'win32': `https://storage.googleapis.com/chrome-for-testing-public/135.0.7049.0/win64/chrome-win64.zip`,
+        'linux': {
+            'x64': `https://storage.googleapis.com/chrome-for-testing-public/135.0.7049.0/linux64/chrome-linux64.zip`,
+            'arm64': `https://storage.googleapis.com/chrome-for-testing-public/135.0.7049.0/linux-arm64/chrome-linux-arm64.zip`,
+        },
+        'darwin': {
+            'x64': `https://storage.googleapis.com/chrome-for-testing-public/135.0.7049.0/mac-x64/chrome-mac-x64.zip`,
+            'arm64': `https://storage.googleapis.com/chrome-for-testing-public/135.0.7049.0/mac-arm64/chrome-mac-arm64.zip`,
+        },
+        'win32': {
+            'x64': `https://storage.googleapis.com/chrome-for-testing-public/135.0.7049.0/win64/chrome-win64.zip`,
+            'arm64': `https://storage.googleapis.com/chrome-for-testing-public/135.0.7049.0/win-arm64/chrome-win-arm64.zip`,
+        },
     };
 
     const platform = process.platform;
-    const url = urls[platform];
+    const url = urls[platform] && urls[platform][arch];
     if (!url) {
         console.error(`No Chrome URL for platform: ${platform}`);
         return null;

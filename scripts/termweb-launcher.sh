@@ -3,7 +3,22 @@ set -euo pipefail
 # TermWeb Browser — master launcher
 # Installed by scripts/install.sh or included in release archives.
 DATA_DIR="${HOME}/.termweb"
-CHROME_PATH="$(cat "${DATA_DIR}/chrome-path.txt" 2>/dev/null || echo "")"
+CHROME_PATH=""
+if [ -n "${CHROME_BIN:-}" ]; then
+    CHROME_PATH="$CHROME_BIN"
+elif [ -n "${CHROME_PATH_ENV:-}" ]; then
+    CHROME_PATH="$CHROME_PATH_ENV"
+elif [ -f "${DATA_DIR}/chrome-path.txt" ]; then
+    CHROME_PATH="$(cat "${DATA_DIR}/chrome-path.txt")"
+elif command -v google-chrome >/dev/null 2>&1; then
+    CHROME_PATH="$(command -v google-chrome)"
+elif command -v google-chrome-stable >/dev/null 2>&1; then
+    CHROME_PATH="$(command -v google-chrome-stable)"
+elif command -v chromium-browser >/dev/null 2>&1; then
+    CHROME_PATH="$(command -v chromium-browser)"
+elif command -v chromium >/dev/null 2>&1; then
+    CHROME_PATH="$(command -v chromium)"
+fi
 PID_FILE="/tmp/termweb-server.pid"
 
 # Handle --help

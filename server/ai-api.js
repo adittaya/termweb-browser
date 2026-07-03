@@ -503,7 +503,17 @@ function parseBody(req) {
     }
 
     let data = '';
-    req.on('data', chunk => { data += chunk; });
+    let size = 0;
+    const MAX_BODY = 1024 * 1024; // 1MB limit
+    req.on('data', chunk => {
+      size += chunk.length;
+      if (size > MAX_BODY) {
+        req.destroy();
+        resolve({});
+        return;
+      }
+      data += chunk;
+    });
     req.on('end', () => {
       try { resolve(JSON.parse(data)); }
       catch { resolve({}); }

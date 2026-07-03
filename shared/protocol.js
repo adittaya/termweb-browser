@@ -30,7 +30,7 @@ const MessageTypes = {
 
   // Scroll by delta pixels
   SCROLL: 'scroll',
-  // { deltaX: number, deltaY: number, tabId?: string }
+  // { delta_x: number, delta_y: number, tabId?: string }
 
   // Type text into the currently focused element
   TYPE: 'type',

@@ -123,8 +123,6 @@ fn handle_command(state: &mut DisplayState, cmd: &str) -> Option<String> {
     } else if cmd == "mode:url" {
         state.url_buffer = state.url.clone();
         state.mode = Mode::UrlInput { cursor: state.url.len() };
-    } else if cmd == "mode:find" {
-        state.mode = Mode::FindActive { cursor: 0 };
     } else if let Some(key) = cmd.strip_prefix("url_key:") {
         match key {
             "Enter" => {
@@ -196,10 +194,73 @@ fn handle_command(state: &mut DisplayState, cmd: &str) -> Option<String> {
                 }
             }
         }
+    } else if let Some(key) = cmd.strip_prefix("find_key:") {
+        match key {
+            "Enter" => {
+                let text = std::mem::take(&mut state.find_buffer);
+                if !text.is_empty() {
+                    let msg = Message::new(types::FIND_IN_PAGE, to_payload(&protocol::FindInPagePayload {
+                        text,
+                        tab_id: None,
+                    }));
+                    state.mode = Mode::Normal;
+                    return Some(msg.to_json());
+                } else {
+                    state.mode = Mode::Normal;
+                }
+            }
+            "Backspace" => {
+                if let Mode::FindActive { cursor } = &state.mode {
+                    let mut c = *cursor;
+                    if c > 0 {
+                        c -= 1;
+                        state.find_buffer.remove(c);
+                        state.mode = Mode::FindActive { cursor: c };
+                    }
+                }
+            }
+            "Delete" => {
+                if let Mode::FindActive { cursor } = &state.mode {
+                    let c = *cursor;
+                    if c < state.find_buffer.len() {
+                        state.find_buffer.remove(c);
+                        state.mode = Mode::FindActive { cursor: c };
+                    }
+                }
+            }
+            "clear" => {
+                state.find_buffer.clear();
+            }
+            _ => {
+                if key.len() == 1 && !["Enter","Escape","Backspace","Delete"].contains(&key) {
+                    if let Mode::FindActive { cursor } = &state.mode {
+                        let c = *cursor;
+                        state.find_buffer.insert(c, key.chars().next().unwrap());
+                        state.mode = Mode::FindActive { cursor: c + 1 };
+                    }
+                }
+            }
+        }
+    } else if cmd.starts_with("mode:find") {
+        state.mode = Mode::FindActive { cursor: 0 };
+        state.find_buffer.clear();
+    } else if let Some(idx_str) = cmd.strip_prefix("switch_to_tab_idx:") {
+        if let Ok(idx) = idx_str.parse::<usize>() {
+            if idx > 0 && idx <= state.tabs.len() {
+                let tab_id = state.tabs[idx - 1].id.clone();
+                let msg = Message::new(types::SWITCH_TAB, to_payload(&protocol::SwitchTabPayload {
+                    tab_id,
+                }));
+                return Some(msg.to_json());
+            }
+        }
     } else if let Some(val) = cmd.strip_prefix("loading:") {
         state.loading = val == "true";
     } else if let Some(val) = cmd.strip_prefix("status:") {
         state.status = val.to_string();
+    } else if let Some(val) = cmd.strip_prefix("error_msg:") {
+        state.push_error(val);
+        state.status = format!("⚠ {}", val);
     } else if let Some(val) = cmd.strip_prefix("tabs:") {
         if let Ok(tabs) = serde_json::from_str::<Vec<TabInfo>>(val) {
             state.tabs = tabs;
@@ -219,8 +280,10 @@ async fn websocket_task(
 
     while running.load(Ordering::Relaxed) {
         log::info!("Connecting to {url}");
-        match connect_async(url).await {
-            Ok((ws_stream, _)) => {
+        let connect = connect_async(url);
+        let connect = tokio::time::timeout(Duration::from_secs(5), connect).await;
+        match connect {
+            Ok(Ok((ws_stream, _))) => {
                 reconnect_delay = Duration::from_secs(1);
                 let (mut write, mut read) = ws_stream.split();
 
@@ -266,8 +329,11 @@ async fn websocket_task(
                     }
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 log::error!("Connection failed: {e}");
+            }
+            Err(_) => {
+                log::error!("Connection timed out after 5s");
             }
         }
 
@@ -348,7 +414,7 @@ fn handle_server_message(text: &str, frame_tx: &mpsc::Sender<Vec<u8>>, cmd_tx: &
         }
         types::ERROR => {
             if let Some(err) = msg.payload.get("message").and_then(|v| v.as_str()) {
-                let _ = cmd_tx.try_send(format!("status:Server: {err}"));
+                let _ = cmd_tx.try_send(format!("error_msg:{err}"));
             }
         }
         _ => {}
@@ -433,21 +499,23 @@ async fn handle_find_input(
     tx: &mpsc::Sender<String>,
 ) {
     match k.key.as_str() {
-        "Enter" | "Escape" => {
+        "Enter" => {
+            let _ = tx.send("find_key:Enter".to_string()).await;
+        }
+        "Escape" => {
             *mode = Mode::Normal;
             let _ = tx.send("mode:normal".to_string()).await;
+            let _ = tx.send("find_key:clear".to_string()).await;
         }
         "Backspace" => {
-            if let Mode::FindActive { cursor } = mode {
-                if *cursor > 0 {
-                    *cursor -= 1;
-                }
-            }
+            let _ = tx.send("find_key:Backspace".to_string()).await;
+        }
+        "Delete" => {
+            let _ = tx.send("find_key:Delete".to_string()).await;
         }
         _ => {
-            if !k.ctrl && !k.alt && !k.is_special && k.key.len() == 1 {
-                *mode = Mode::Normal;
-                let _ = tx.send("mode:normal".to_string()).await;
+            if !k.ctrl && !k.alt && k.key.len() == 1 && !k.is_special {
+                let _ = tx.send(format!("find_key:{}", k.key)).await;
             }
         }
     }
@@ -496,11 +564,7 @@ async fn handle_normal_input(
                 return;
             }
             "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
-                let idx: usize = k.key.parse().unwrap_or(1);
-                let msg = Message::new(types::SWITCH_TAB, to_payload(&protocol::SwitchTabPayload {
-                    tab_id: idx.to_string(),
-                }));
-                let _ = tx.send(format!("ws:{}", msg.to_json())).await;
+                let _ = tx.send(format!("switch_to_tab_idx:{}", k.key)).await;
                 return;
             }
             _ => {}

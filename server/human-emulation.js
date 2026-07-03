@@ -185,19 +185,15 @@ function generateMousePath(start, end, opts = {}) {
  * @param {Object} [opts]   — optional overrides
  */
 async function humanMouseMove(page, targetX, targetY, opts = {}) {
-  const startPos = await page.mouse._position || { x: 0, y: 0 };
-
-  // Fallback: if we can't get the current position, read it from JS
-  let currentPos = startPos;
-  if (currentPos.x === 0 && currentPos.y === 0) {
-    try {
-      currentPos = await page.evaluate(() => ({
-        x: window.__lastMouseX || 0,
-        y: window.__lastMouseY || 0,
-      }));
-    } catch {
-      currentPos = { x: 0, y: 0 };
-    }
+  // Track mouse position via JS-side tracking (avoids private API)
+  let currentPos = { x: 0, y: 0 };
+  try {
+    currentPos = await page.evaluate(() => ({
+      x: window.__lastMouseX || 0,
+      y: window.__lastMouseY || 0,
+    }));
+  } catch {
+    currentPos = { x: 0, y: 0 };
   }
 
   const path = generateMousePath(currentPos, { x: targetX, y: targetY }, opts);
